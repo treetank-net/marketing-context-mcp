@@ -1,0 +1,78 @@
+{
+  "name": "marketing-context-mcp",
+  "description": "Filesystem-backed MCP server for durable marketing context: reusable knowledge, client profiles, decisions, reviews, preferences, and confirmed mutation logs. Feedback & bug reports: Jacek Mariański (jmarianski@trans.eu)",
+  "version": "0.11.0",
+  "author": {
+    "name": "Jacek Mariański",
+    "email": "jmarianski@trans.eu",
+    "url": "https://treetank.net"
+  },
+  "license": "MIT",
+  "keywords": ["marketing", "context", "memory", "knowledge", "ads", "mcp"],
+  "mcpServers": {
+    "marketing-context": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/start-mcp.js"],
+      "env": {
+        "CLAUDE_PLUGIN_DATA": "${CLAUDE_PLUGIN_DATA}",
+        "MARKETING_CONTEXT_DIR": "${MARKETING_CONTEXT_DIR:-}",
+        "MARKETING_KNOWLEDGE_DIR": "${MARKETING_KNOWLEDGE_DIR:-}"
+      }
+    }
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${CLAUDE_PLUGIN_ROOT}/hook.cjs"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${CLAUDE_PLUGIN_ROOT}/hook.cjs"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "mcp__.*(google-ads|meta-ads).*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${CLAUDE_PLUGIN_ROOT}/hook.cjs"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "mcp__.*(google-ads|meta-ads).*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${CLAUDE_PLUGIN_ROOT}/hook.cjs"
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__.*marketing-context.*(read_knowledge|set_current_client|get_client_context)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ${CLAUDE_PLUGIN_ROOT}/hook.cjs"
+          }
+        ]
+      }
+    ]
+  }
+}

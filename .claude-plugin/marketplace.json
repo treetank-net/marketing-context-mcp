@@ -1,0 +1,17 @@
+{
+  "name": "marketing-context-mcp-marketplace",
+  "metadata": {
+    "description": "Durable marketing context and memory plugin by Treetank."
+  },
+  "owner": {
+    "name": "treetank"
+  },
+  "plugins": [
+    {
+      "description": "Filesystem-backed MCP server for reusable marketing knowledge, client context, decisions, reviews, preferences, and mutation logs.",
+      "name": "marketing-context-mcp",
+      "source": "./",
+      "version": "0.10.0"
+    }
+  ]
+}

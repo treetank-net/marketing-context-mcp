@@ -1,0 +1,45 @@
+{
+  "name": "@treetank/marketing-context-mcp",
+  "version": "0.11.0",
+  "description": "Filesystem-backed MCP server for reusable marketing context.",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "marketing-context-mcp": "bundle.cjs"
+  },
+  "files": [
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    ".claude-plugin",
+    ".codex-plugin",
+    ".mcp.json",
+    "bundle.cjs",
+    "hook.cjs",
+    "dist",
+    "knowledge",
+    "!knowledge/clients",
+    "docs",
+    "scripts"
+  ],
+  "scripts": {
+    "build": "tsc && npx esbuild dist/index.js --bundle --platform=node --target=node18 --format=cjs --minify --outfile=bundle.cjs && npx esbuild dist/hook.js --bundle --platform=node --target=node18 --format=cjs --outfile=hook.cjs",
+    "typecheck": "tsc --noEmit",
+    "start": "node bundle.cjs",
+    "smoke": "node dist/smoke.js",
+    "calibrate:embeddings": "node scripts/calibrate-embeddings.mjs",
+    "audit:knowledge": "node scripts/knowledge-audit.mjs",
+    "audit:provenance": "node scripts/knowledge-provenance-audit.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.13.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.24",
+    "esbuild": "^0.28.1",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

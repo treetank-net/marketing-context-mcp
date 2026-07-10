@@ -1,0 +1,39 @@
+{
+  "name": "marketing-context-mcp",
+  "version": "0.11.0",
+  "description": "Filesystem-backed MCP server for durable marketing context.",
+  "author": {
+    "name": "treetank",
+    "url": "https://treetank.net"
+  },
+  "homepage": "https://github.com/treetank-net/marketing-context-mcp",
+  "repository": "https://github.com/treetank-net/marketing-context-mcp",
+  "license": "MIT",
+  "keywords": [
+    "marketing",
+    "context",
+    "memory",
+    "knowledge",
+    "ads",
+    "mcp"
+  ],
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Marketing Context MCP",
+    "shortDescription": "Store and retrieve durable marketing context.",
+    "longDescription": "Filesystem-backed marketing context MCP server for reusable knowledge, client profiles, decisions, reviews, preferences, and confirmed mutation logs.",
+    "developerName": "treetank",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "List available marketing knowledge.",
+      "Get context for a client.",
+      "Record an ads decision for future work."
+    ],
+    "brandColor": "#0F766E"
+  }
+}

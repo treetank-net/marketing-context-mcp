@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "marketing-context": {
+      "command": "node",
+      "args": ["scripts/start-mcp.js"],
+      "cwd": ".",
+      "env": {
+        "MARKETING_CONTEXT_DIR": "${MARKETING_CONTEXT_DIR:-}",
+        "MARKETING_KNOWLEDGE_DIR": "${MARKETING_KNOWLEDGE_DIR:-}"
+      }
+    }
+  }
+}
