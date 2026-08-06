@@ -36,6 +36,15 @@ This skill enforces it.
 - Before committing changes in `google-ads-baby` or `meta-ads-baby`.
 - Any time you suspect the plugins' kernels have diverged.
 
+## Release boundary
+
+This skill is a contract check, not a release workflow. Running it never
+authorizes `npm publish`, `npm unpublish`, `npm deprecate`, a git tag, a push, or
+any other external release action. Treat npm publication as an explicit,
+separate user decision, including the exact package and version. If a request
+mentions deployment without explicitly naming a registry release, stop at the
+local checks and report what is ready to release.
+
 ## How to run
 
 ```bash
@@ -73,5 +82,7 @@ lines of hook, never a copy of the kernel.
 - This skill lives in `.claude/skills/` and is excluded from the npm `files`
   whitelist and from the plugin export (`.claude-plugin/`). It must stay
   developer-only. Do not move it under a distributed path.
+- Changes to this skill update developer guidance only; they do not require an
+  npm release.
 - The contract doc is the single source of truth. Keep the machine-readable
   regions (`kernel-tools`, `log-fields`) intact — the check parses them.
