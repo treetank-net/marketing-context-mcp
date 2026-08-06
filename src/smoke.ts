@@ -1,4 +1,5 @@
-import { spawn } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -175,13 +176,14 @@ if (!doneRaw.includes('status → done') || !doneRaw.includes('Monitoring for 3 
 if ((await listTasks(cfg, { client_slug: 'acme', status: 'open' })).length !== 1) throw new Error('Closing a task did not change open count.');
 
 // --- tasks: hook surfaces active tasks once a client/platform is in play ---
-const taskSession = `task-smoke-${Date.now()}`;
-await runHook({ hook_event_name: 'SessionStart', session_id: taskSession }, { MARKETING_CONTEXT_DIR: rootDir, MARKETING_CONTEXT_SEMANTIC: '0' });
+const taskSession = `task-smoke-${randomUUID()}`;
 const taskInject = await runHook(
   { hook_event_name: 'UserPromptSubmit', session_id: taskSession, prompt: 'What should I do next on Google Ads for this account?' },
   { MARKETING_CONTEXT_DIR: rootDir, MARKETING_CONTEXT_SEMANTIC: '0' },
 );
-if (!taskInject.includes('Active tasks')) throw new Error(`Task injection missing. Output: ${taskInject.slice(0, 400)}`);
+if (!taskInject.includes('Active tasks')) {
+  throw new Error(`Task injection missing. session=${taskSession} root=${rootDir} Output: ${taskInject.slice(0, 400)}`);
+}
 
 // --- recurring tasks + scheduling ---
 if (computeNextDue('weekly', '2026-07-07T09:00:00.000Z') !== '2026-07-14T09:00:00.000Z') {
@@ -376,7 +378,7 @@ const address = rankServer.address();
 if (!address || typeof address === 'string') throw new Error('Rank smoke server did not bind.');
 await writeFile(semanticDiscovery, JSON.stringify({ port: address.port, token }), 'utf8');
 
-const sessionId = `semantic-smoke-${Date.now()}`;
+const sessionId = `semantic-smoke-${randomUUID()}`;
 await runHook(
   {
     hook_event_name: 'UserPromptSubmit',
@@ -400,34 +402,277 @@ const blocked = await runHook(
     MARKETING_CONTEXT_EMBED_DISCOVERY: semanticDiscovery,
   },
 );
-if (!blocked.includes('google-ads/product-bucketing.md')) {
-  throw new Error(`Semantic required-reading gate did not include product-bucketing.md. Output: ${blocked}`);
+// The platform baseline (enforce_read) still gates every ads tool ...
+if (!blocked.includes('google-ads/always-never-checklist.md')) {
+  throw new Error(`Baseline required-reading gate missing always-never-checklist.md. Output: ${blocked}`);
+}
+// ... but a semantically ranked article that has nothing to do with the tool
+// being called must not become mandatory reading: that is what let a session's
+// chatter dictate the gate.
+if (blocked.includes('google-ads/product-bucketing.md')) {
+  throw new Error(`Semantic match unrelated to get_campaigns must not be enforced. Output: ${blocked}`);
 }
 await new Promise<void>((resolve) => rankServer.close(() => resolve()));
 
+// --- gate relevance: the required set follows the TOOL, not the session ------
+// Reproduces four defects observed in a live Google Ads session: a budget
+// change demanding the Looker Studio hygiene workflow and the benchmarks index,
+// a Search campaign demanding the Merchant Center feed workflow, confirm_mutation
+// demanding a new article between preview and execution, and a pure Google Ads
+// session being handed Meta start-pack articles.
+const gateRoot = await mkdtemp(join(tmpdir(), 'marketing-context-gate-smoke-'));
+const gateDiscovery = join(gateRoot, 'embed-endpoint.json');
+await writeFile(join(gateRoot, '.marketing-context.json'), JSON.stringify({ knowledge_mode: 'copy' }), 'utf8');
+for (const dir of ['google-ads', 'meta-ads', 'reporting', 'general', 'analytics']) {
+  await mkdir(join(gateRoot, dir), { recursive: true });
+}
+const gateArticles: Array<[string, string[]]> = [
+  ['google-ads/always-never-checklist.md', [
+    'keywords: [checklista, zawsze, nigdy, kontrola zmian]',
+    'applies_to: [google-ads]',
+    'priority: 5',
+    'enforce_read: true',
+    'summary: Google Ads ground rules.',
+  ]],
+  ['google-ads/budget-scaling-seasonality.md', [
+    'keywords: [budżet, skalowanie, sezonowość]',
+    'applies_to: [google-ads]',
+    'priority: 4',
+    'summary: Budget scaling rules.',
+  ]],
+  ['google-ads/search-keywords-copywriting.md', [
+    'keywords: [słowa kluczowe, responsive search ads, copywriting]',
+    'applies_to: [google-ads]',
+    'priority: 4',
+    'summary: Search keywords and ad copy.',
+  ]],
+  ['google-ads/google-ads-feed-health.md', [
+    'keywords: [feed health, merchant center, shopping, pmax]',
+    'applies_to: [google-ads]',
+    'priority: 4',
+    'summary: Merchant Center feed health workflow.',
+  ]],
+  ['reporting/reporting-refresh.md', [
+    'keywords: [reporting, dashboard, looker studio, raportowanie]',
+    'applies_to: [analytics, google-ads, meta-ads]',
+    'priority: 3',
+    'summary: Looker Studio dashboard hygiene.',
+  ]],
+  ['general/benchmarks-index.md', [
+    'keywords: [benchmark, cpc, cpm, ctr, roas]',
+    'applies_to: [google-ads, meta-ads]',
+    'priority: 2',
+    'summary: Advertising benchmarks index.',
+  ]],
+  ['meta-ads/pixel-capi-signal-quality.md', [
+    'keywords: [pixel, capi, event match quality]',
+    'applies_to: [meta-ads]',
+    'priority: 4',
+    'summary: Meta signal quality.',
+  ]],
+  ['meta-ads/budgeting-abo-cbo-advantage.md', [
+    'keywords: [abo, cbo, advantage budget]',
+    'applies_to: [meta-ads]',
+    'trigger_stage: [prompt, pre_tool]',
+    'trigger_tools: [prepare_budget_change]',
+    'priority: 4',
+    'summary: Meta ABO/CBO budgeting.',
+  ]],
+  ['analytics/meta-pixel-capi.md', [
+    'keywords: [meta pixel, conversions api, deduplikacja]',
+    'applies_to: [meta-ads]',
+    'priority: 3',
+    'summary: Meta Pixel and CAPI.',
+  ]],
+];
+for (const [path, frontmatter] of gateArticles) {
+  await writeFile(
+    join(gateRoot, path),
+    ['---', ...frontmatter, '---', `# ${path}`, 'Body.'].join('\n'),
+    'utf8',
+  );
+}
+
+// A ranker that behaves as the real one did: it returns its whole top list for
+// the conversation window, Meta articles included, all above the enforcement
+// threshold.
+const gateToken = 'gate-smoke-token';
+const gateRankServer = createServer((req, res) => {
+  if (req.url !== '/rank' || req.headers.authorization !== `Bearer ${gateToken}`) {
+    res.writeHead(401).end('{}');
+    return;
+  }
+  res.writeHead(200, { 'content-type': 'application/json' });
+  res.end(JSON.stringify({
+    status: 'ok',
+    matches: gateArticles.map(([path]) => ({ path, applies_to: [], similarity: 0.9 })),
+  }));
+});
+await new Promise<void>((resolve) => gateRankServer.listen(0, '127.0.0.1', resolve));
+const gateAddress = gateRankServer.address();
+if (!gateAddress || typeof gateAddress === 'string') throw new Error('Gate smoke rank server did not bind.');
+await writeFile(gateDiscovery, JSON.stringify({ port: gateAddress.port, token: gateToken }), 'utf8');
+
+const gateEnv = {
+  MARKETING_CONTEXT_DIR: gateRoot,
+  MARKETING_CONTEXT_EMBED_DISCOVERY: gateDiscovery,
+  MARKETING_CONTEXT_SEMANTIC_TIMEOUT_MS: '2000',
+};
+const gateSession = `gate-smoke-${randomUUID()}`;
+
+function denyReason(output: string): string | null {
+  if (!output.trim()) return null;
+  const parsed = JSON.parse(output);
+  if (parsed?.hookSpecificOutput?.permissionDecision === 'deny') return String(parsed.reason || '');
+  return null;
+}
+async function gateFor(toolName: string): Promise<string | null> {
+  return denyReason(await runHook({ hook_event_name: 'PreToolUse', session_id: gateSession, tool_name: toolName }, gateEnv));
+}
+async function readKnowledge(path: string): Promise<void> {
+  await runHook(
+    { hook_event_name: 'PostToolUse', session_id: gateSession, tool_name: 'mcp__marketing-context__read_knowledge', tool_input: { path } },
+    gateEnv,
+  );
+}
+
+// Observation 4: a Google Ads session must not be handed Meta articles, however
+// confidently the platform-blind ranker returns them.
+await runHook({ hook_event_name: 'SessionStart', session_id: gateSession }, gateEnv);
+const gatePrompt = await runHook(
+  { hook_event_name: 'UserPromptSubmit', session_id: gateSession, prompt: 'Podnieś budżet dzienny kampanii Search w Google Ads o 20%.' },
+  gateEnv,
+);
+for (const metaDoc of ['meta-ads/pixel-capi-signal-quality.md', 'meta-ads/budgeting-abo-cbo-advantage.md', 'analytics/meta-pixel-capi.md']) {
+  if (gatePrompt.includes(metaDoc)) {
+    throw new Error(`Google Ads session injected a Meta article (${metaDoc}). Output: ${gatePrompt.slice(0, 600)}`);
+  }
+}
+
+// Observation 1: a budget change asks for the ground rules and the budget
+// article — not for dashboard hygiene or the benchmarks index.
+const budgetGate = await gateFor('mcp__google-ads__prepare_budget_change');
+if (!budgetGate) throw new Error('prepare_budget_change should still be gated by the platform baseline.');
+if (!budgetGate.includes('google-ads/always-never-checklist.md')) {
+  throw new Error(`Budget gate lost the platform baseline: ${budgetGate}`);
+}
+if (!budgetGate.includes('google-ads/budget-scaling-seasonality.md')) {
+  throw new Error(`Budget gate did not ask for the budget article: ${budgetGate}`);
+}
+for (const offTopic of ['reporting/reporting-refresh.md', 'general/benchmarks-index.md', 'meta-ads/budgeting-abo-cbo-advantage.md']) {
+  if (budgetGate.includes(offTopic)) throw new Error(`Budget gate demanded an unrelated article (${offTopic}): ${budgetGate}`);
+}
+if ((budgetGate.match(/read_knowledge\(/g) || []).length > 3) {
+  throw new Error(`Gate demanded more than 3 articles at once: ${budgetGate}`);
+}
+
+await readKnowledge('google-ads/always-never-checklist.md');
+await readKnowledge('google-ads/budget-scaling-seasonality.md');
+if (await gateFor('mcp__google-ads__prepare_budget_change')) {
+  throw new Error('prepare_budget_change should pass once its required articles were read.');
+}
+
+// Observation 3: the second phase of the same operation adds no new demand,
+// however much the session talked in between.
+await runHook(
+  { hook_event_name: 'UserPromptSubmit', session_id: gateSession, prompt: 'Potwierdzam, safe word: kotek. Wykonaj zmianę.' },
+  gateEnv,
+);
+const confirmGate = await gateFor('mcp__google-ads__confirm_mutation');
+if (confirmGate) throw new Error(`confirm_mutation must not introduce new required reading: ${confirmGate}`);
+
+// Observation 2: creating a Search campaign asks for keywords/copywriting, not
+// for the Merchant Center feed workflow (a Search campaign has no feed).
+const searchGate = await gateFor('mcp__google-ads__prepare_search_campaign_full');
+if (!searchGate) throw new Error('prepare_search_campaign_full should be gated by its topical article.');
+if (!searchGate.includes('google-ads/search-keywords-copywriting.md')) {
+  throw new Error(`Search campaign gate did not ask for keywords/copywriting: ${searchGate}`);
+}
+if (searchGate.includes('google-ads/google-ads-feed-health.md')) {
+  throw new Error(`Search campaign gate demanded the feed workflow: ${searchGate}`);
+}
+
+// A read tool carries the baseline only — no topical demands, no session noise.
+await readKnowledge('google-ads/search-keywords-copywriting.md');
+if (await gateFor('mcp__google-ads__get_campaigns')) {
+  throw new Error('A read tool must not demand topical articles once the baseline is read.');
+}
+
+// pre_tool injection is platform-scoped too: trigger_tools names are shared
+// across the ads MCPs, so Meta's budgeting article must stay out of a Google
+// Ads budget change.
+const budgetInject = await runHook(
+  { hook_event_name: 'PreToolUse', session_id: gateSession, tool_name: 'mcp__google-ads__prepare_budget_change' },
+  gateEnv,
+);
+if (budgetInject.includes('meta-ads/budgeting-abo-cbo-advantage.md')) {
+  throw new Error(`Google Ads pre_tool injection pulled Meta's budgeting article: ${budgetInject}`);
+}
+await new Promise<void>((resolve) => gateRankServer.close(() => resolve()));
+
+// --- retrieval unit checks: tool-name derived requirements ------------------
+const { requiredReadingForTool, toolTerms } = await import('./retrieval.js');
+if (!toolTerms('mcp__google-ads__prepare_budget_change').includes('budget')) {
+  throw new Error('toolTerms lost the domain noun of prepare_budget_change.');
+}
+if (toolTerms('mcp__google-ads__prepare_budget_change').some((t) => ['prepare', 'prepar', 'google', 'ads'].includes(t))) {
+  throw new Error('toolTerms kept protocol/platform tokens.');
+}
+const unitDocs: import('./storage.js').KnowledgeDoc[] = [
+  { path: 'google-ads/always-never-checklist.md', title: 'Zawsze / nigdy', frontmatter: { applies_to: ['google-ads'], enforce_read: true, priority: 5 }, body: '' },
+  { path: 'google-ads/budget-scaling-seasonality.md', title: 'Budżet i skalowanie', frontmatter: { applies_to: ['google-ads'], priority: 4 }, body: 'budget' },
+  { path: 'reporting/reporting-refresh.md', title: 'Reporting Refresh', frontmatter: { applies_to: ['analytics', 'google-ads'], priority: 3, keywords: ['looker studio', 'dashboard'] }, body: 'budget mentioned in passing' },
+  { path: 'meta-ads/budgeting-abo-cbo-advantage.md', title: 'ABO/CBO', frontmatter: { applies_to: ['meta-ads'], trigger_tools: ['prepare_budget_change'], priority: 4 }, body: '' },
+];
+const unitRequired = requiredReadingForTool(unitDocs, 'google-ads', 'prepare_budget_change', {
+  semanticCandidates: ['reporting/reporting-refresh.md'],
+});
+if (!unitRequired.includes('google-ads/always-never-checklist.md') || !unitRequired.includes('google-ads/budget-scaling-seasonality.md')) {
+  throw new Error(`requiredReadingForTool missing baseline/topical: ${unitRequired.join(', ')}`);
+}
+if (unitRequired.includes('reporting/reporting-refresh.md')) {
+  throw new Error('A body-only match promoted by the semantic ranker must not be required.');
+}
+if (unitRequired.includes('meta-ads/budgeting-abo-cbo-advantage.md')) {
+  throw new Error('An article whose applies_to excludes the platform must not be required.');
+}
+// A recurring review workflow is a task template, not preflight reading: a
+// Search campaign must not be gated behind the weekly feed-health routine even
+// though both talk about campaigns.
+const workflowDocs: import('./storage.js').KnowledgeDoc[] = [
+  { path: 'google-ads/google-ads-feed-health.md', title: 'Workflow: Feed Health', frontmatter: { applies_to: ['google-ads'], task_type: ['workflow'], default_schedule: 'weekly', priority: 4, keywords: ['feed health', 'campaign coverage'] }, body: '' },
+  { path: 'google-ads/search-keywords-copywriting.md', title: 'Search: słowa kluczowe', frontmatter: { applies_to: ['google-ads'], priority: 4, keywords: ['search', 'copywriting'] }, body: '' },
+];
+const searchRequired = requiredReadingForTool(workflowDocs, 'google-ads', 'prepare_search_campaign_full', {
+  semanticCandidates: ['google-ads/google-ads-feed-health.md'],
+});
+if (!searchRequired.includes('google-ads/search-keywords-copywriting.md')) {
+  throw new Error(`Search campaign should require keywords/copywriting: ${searchRequired.join(', ')}`);
+}
+if (searchRequired.includes('google-ads/google-ads-feed-health.md')) {
+  throw new Error('A recurring review workflow must not be required before an operation.');
+}
+
+const unitConfirm = requiredReadingForTool(unitDocs, 'google-ads', 'confirm_mutation', {
+  semanticCandidates: ['reporting/reporting-refresh.md'],
+  includeTopical: false,
+});
+if (unitConfirm.length !== 1 || unitConfirm[0] !== 'google-ads/always-never-checklist.md') {
+  throw new Error(`confirm_* should require the baseline only: ${unitConfirm.join(', ')}`);
+}
+
 console.log('smoke ok');
 
-function runHook(payload: unknown, env: Record<string, string>): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['hook.cjs'], {
-      cwd: process.cwd(),
-      env: { ...process.env, ...env },
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
-    child.stdout.on('data', (chunk) => { stdout += chunk; });
-    child.stderr.on('data', (chunk) => { stderr += chunk; });
-    child.on('error', reject);
-    child.on('close', (code) => {
-      if (code !== 0) {
-        reject(new Error(`hook.cjs failed (${code}): ${stderr || stdout}`));
-      } else {
-        resolve(stdout);
-      }
-    });
-    child.stdin.end(JSON.stringify(payload));
+async function runHook(payload: unknown, env: Record<string, string>): Promise<string> {
+  const result = spawnSync(process.execPath, [join(process.cwd(), 'hook.cjs')], {
+    cwd: process.cwd(),
+    env: { ...process.env, ...env },
+    input: JSON.stringify(payload),
+    encoding: 'utf8',
   });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error(`hook.cjs failed (${result.status}): ${result.stderr || result.stdout}`);
+  }
+  return result.stdout || '';
 }

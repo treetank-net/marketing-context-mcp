@@ -24,9 +24,11 @@ function hookCfg(): MarketingContextConfig {
 }
 import { listClientNotes, listDueTasks, listKnowledgeFiles, redactSecrets, type KnowledgeDoc, type TaskRecord } from './storage.js';
 import {
+  appliesToPlatform,
   detectPlatforms,
   frontmatterList,
-  requiredReading,
+  platformOk,
+  requiredReadingForTool,
   selectForPromptScored,
   selectForSessionStart,
   selectSessionStartGeneric,
@@ -45,6 +47,12 @@ const MUTATION_TOOLS = ['confirm_mutation', 'confirm_all_mutations'];
 // a session must never hard-lock (e.g. when the MCP server is not connected
 // and read_knowledge is simply unavailable).
 const ENFORCE_MAX_DENIES = 3;
+// A gate demands at most this many articles per call. Eight at once is not a
+// gate, it is a wall: the model either burns the context on all of them or
+// gives up on the operation. Anything beyond the cap is demanded on the next
+// call, once the first batch is read — the requirement is deferred, not dropped.
+const MAX_REQUIRED_PER_CALL = 3;
+const SEMANTIC_REQUIRED_MEMORY = 12;
 const SEMANTIC_TIMEOUT_MS = Number(process.env.MARKETING_CONTEXT_SEMANTIC_TIMEOUT_MS || 350);
 const SEMANTIC_INJECT = Number(process.env.MARKETING_CONTEXT_SEMANTIC_INJECT || 0.45);
 const SEMANTIC_ENFORCE = Number(process.env.MARKETING_CONTEXT_SEMANTIC_ENFORCE || 0.60);
@@ -71,6 +79,15 @@ interface SessionState {
   readDocs: string[];
   /** Per-platform count of enforcement denies (capped by ENFORCE_MAX_DENIES). */
   denies: Record<string, number>;
+  /**
+   * readDocs.length at the previous deny, per platform. The deny cap exists to
+   * break a hard lock (read_knowledge unavailable), not to punish a session
+   * that keeps reading: when the model read something since the last deny, the
+   * counter resets.
+   */
+  lastDenyReads?: Record<string, number>;
+  /** Ads platforms seen in this session's prompts — keeps a later, platform-less prompt on topic. */
+  platforms: string[];
   /**
    * Client notes exist but were too large to inject at session start — the
    * model works blind about the client until it loads them explicitly. Cleared
@@ -127,7 +144,14 @@ async function main() {
     } else if (event === 'UserPromptSubmit') {
       state.round += 1;
       const prompt = String(input.prompt || '');
-      const platforms = detectPlatforms(prompt);
+      const promptPlatforms = detectPlatforms(prompt);
+      for (const name of promptPlatforms) {
+        if (!state.platforms.includes(name)) state.platforms.push(name);
+      }
+      // A prompt mid-session often names no platform ("podnieś budżet o 20%").
+      // The session already told us which one is in play, and that memory is
+      // what keeps a pure Google Ads session from being handed Meta articles.
+      const platforms = promptPlatforms.length > 0 ? promptPlatforms : state.platforms;
       const semantic = await semanticRank(input, prompt);
       const scored = selectForPromptScored(docs, prompt, { platforms, exclude, limit: 3 });
       // Only confident matches get injected. Weak positive scores are noise —
@@ -139,11 +163,18 @@ async function main() {
         .map((match) => docs.find((doc) => doc.path === match.path))
         .filter((doc): doc is KnowledgeDoc => Boolean(doc))
         .filter((doc) => !exclude.has(doc.path))
+        // The ranker returns the global top-N by cosine and knows nothing about
+        // the platform. Without this filter a Google Ads session gets Pixel/CAPI
+        // and catalog articles injected as "MANDATORY start pack".
+        .filter((doc) => platformOk(doc, platforms))
         .filter((doc) => !picked.some((d) => d.path === doc.path));
       picked.push(...semanticPicked.slice(0, 3));
       for (const match of semantic.filter((m) => m.similarity >= SEMANTIC_ENFORCE)) {
+        const doc = docs.find((candidate) => candidate.path === match.path);
+        if (!doc || !platformOk(doc, platforms)) continue;
         if (!state.semanticRequired.includes(match.path)) state.semanticRequired.push(match.path);
       }
+      state.semanticRequired = state.semanticRequired.slice(-SEMANTIC_REQUIRED_MEMORY);
       debugLog(input.session_id, 'prompt-scoring', {
         round: state.round,
         prompt: prompt.slice(0, 200),
@@ -153,11 +184,13 @@ async function main() {
         semanticRequired: state.semanticRequired,
       });
       if (state.round === 1 && !state.tocInjected) {
-        text = renderKnowledgeToc(docs, state, capacity);
+        text = await appendActiveTasks('', cfg, state, platforms, prompt, capacity);
         text = appendClientNotes(
           text,
           await renderClientNotes(cfg, state, capacity - text.length),
         );
+        const toc = renderKnowledgeToc(docs, state, capacity - text.length);
+        text = text && toc ? `${text}\n\n${toc}` : text || toc;
         saveState(input.session_id, state);
         const chunks = splitIntoChunks(text.trim(), shards);
         writeFollowerChunks(event, input.session_id, chunks, shards);
@@ -185,32 +218,15 @@ async function main() {
         .filter((doc) => platforms.length > 0)
         .filter((doc) => !picked.some((d) => d.path === doc.path));
       picked.unshift(...platformStart);
-      text = renderDocs(picked, state, capacity);
+      text = await appendActiveTasks('', cfg, state, platforms, prompt, capacity);
+      const docsBlock = renderDocs(picked, state, capacity - text.length);
+      text = text && docsBlock ? `${text}\n\n${docsBlock}` : text || docsBlock;
       if (state.round === 1) {
         // Entries are link+summary now, so the notes get nearly all the budget.
         text = appendClientNotes(
           text,
           await renderClientNotes(cfg, state, capacity - text.length),
         );
-      }
-      // Surface active tasks: once per session when a client/platform is in play,
-      // and every time the user explicitly asks what is due / to do.
-      const wantsTasks = TASK_INTENT_RE.test(prompt);
-      if (!state.tasksInjected || wantsTasks) {
-        const filter: { client_slug?: string } = {};
-        if (state.currentClient) filter.client_slug = state.currentClient;
-        // Due = one-off open tasks + recurring tasks whose next_due has passed.
-        let tasks = await listDueTasks(cfg, filter);
-        if (!state.currentClient && platforms.length > 0) {
-          tasks = tasks.filter((t) => !t.platform || platforms.includes(t.platform));
-        }
-        if (tasks.length > 0 && (state.currentClient || platforms.length > 0 || wantsTasks)) {
-          const block = renderTasks(tasks.slice(0, 5), capacity - text.length);
-          if (block) {
-            text = text ? `${text}\n\n${block}` : block;
-            state.tasksInjected = true;
-          }
-        }
       }
     } else if (event === 'PreToolUse') {
       const toolName = String(input.tool_name || '');
@@ -229,7 +245,12 @@ async function main() {
         // Deny cap reached: let the call through, but say so out loud.
         text = gate.reason;
       } else {
-        const picked = selectForTool(docs, toolName, { exclude, limit: 3 });
+        const platform = platformOfTool(toolName);
+        const picked = selectForTool(docs, toolName, {
+          exclude,
+          limit: 3,
+          platforms: platform ? [platform] : undefined,
+        });
         text = renderDocs(picked, state, capacity);
       }
     } else if (event === 'PostToolUse') {
@@ -246,7 +267,11 @@ async function main() {
       }
       text = renderPostToolReminder(toolName);
     }
-  } catch {
+  } catch (error) {
+    debugLog(input.session_id, 'hook-error', {
+      message: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+    });
     process.exit(0);
   }
 
@@ -427,6 +452,34 @@ function renderKnowledgeToc(docs: KnowledgeDoc[], state: SessionState, budget: n
 const TASK_INTENT_RE =
   /what.*(should|to).*(do|next)|what'?s\s+due|to-?do|due tasks?|open tasks?|run a review|\bzadani|zaleg|otwarte zadan|co\s+(mam|robi|robimy|dalej|teraz)|przegl[aą]d/i;
 
+async function appendActiveTasks(
+  base: string,
+  cfg: MarketingContextConfig,
+  state: SessionState,
+  platforms: string[],
+  prompt: string,
+  capacity: number,
+): Promise<string> {
+  // Surface active tasks: once per session when a client/platform is in play,
+  // and every time the user explicitly asks what is due / to do.
+  const wantsTasks = TASK_INTENT_RE.test(prompt);
+  if (state.tasksInjected && !wantsTasks) return base;
+
+  const filter: { client_slug?: string } = {};
+  if (state.currentClient) filter.client_slug = state.currentClient;
+  // Due = one-off open tasks + recurring tasks whose next_due has passed.
+  let tasks = await listDueTasks(cfg, filter);
+  if (!state.currentClient && platforms.length > 0) {
+    tasks = tasks.filter((t) => !t.platform || platforms.includes(t.platform));
+  }
+  if (tasks.length === 0 || (!state.currentClient && platforms.length === 0 && !wantsTasks)) return base;
+
+  const block = renderTasks(tasks.slice(0, 5), capacity - base.length);
+  if (!block) return base;
+  state.tasksInjected = true;
+  return base ? `${base}\n\n${block}` : block;
+}
+
 // Visible task block. Each task is a durable operational intent recorded earlier;
 // it names why it exists, the workflow article to run, the knowledge to read, and
 // how to close it — so the model can act and record the outcome.
@@ -525,6 +578,35 @@ interface GateResult {
 const GATE_EXEMPT_EXACT = ['update_plugin', 'list_accounts', 'list_ad_accounts', 'get_safety_setup'];
 const GATE_EXEMPT_PREFIX = ['setup_'];
 
+/** The ads platform a tool belongs to, read off the MCP server name in the tool id. */
+function platformOfTool(toolName: string): string {
+  if (toolName.includes('google-ads')) return 'google-ads';
+  if (toolName.includes('meta-ads')) return 'meta-ads';
+  return '';
+}
+
+/**
+ * Which tier of requirements a tool carries.
+ *
+ * `prepare_*` is the design step of a mutation: it is where the change is
+ * shaped, where topic-specific rules (budget scaling, keyword/copy rules,
+ * policy limits) still change the outcome, and the only step a model can redo
+ * for free. That is where the topical tier belongs.
+ *
+ * `confirm_*` is the second phase of an operation whose `prepare_*` already
+ * passed this gate. A new demand there lands between the preview the user has
+ * already seen and its execution — it interrupts the confirmation protocol
+ * instead of informing the decision, and the token it guards expires. Confirm
+ * therefore carries the platform baseline only, which prepare already
+ * satisfied, so in practice it adds nothing new.
+ *
+ * Read and diagnostic tools carry the baseline too: an account review that
+ * ignores the always/never list gives advice that breaks the ground rules.
+ */
+function carriesTopicalRequirements(baseName: string): boolean {
+  return baseName.startsWith('prepare_');
+}
+
 /**
  * The teeth behind "MANDATORY": ads-platform tools are denied until the
  * platform's `enforce_read: true` docs have actually been read through
@@ -544,29 +626,34 @@ function checkRequiredReading(
   const baseName = toolName.split('__').pop() || toolName;
   if (GATE_EXEMPT_EXACT.includes(baseName)) return null;
   if (GATE_EXEMPT_PREFIX.some((prefix) => baseName.startsWith(prefix))) return null;
-  const platform = toolName.includes('google-ads') ? 'google-ads' : toolName.includes('meta-ads') ? 'meta-ads' : '';
+  const platform = platformOfTool(toolName);
   if (!platform) return null;
 
   const read = new Set(state.readDocs);
-  const missing = requiredReading(docs, platform)
-    .map((doc) => doc.path)
-    .concat(
-      state.semanticRequired.filter((path) => {
-        const doc = docs.find((candidate) => candidate.path === path);
-        if (!doc) return false;
-        const appliesTo = frontmatterList(doc.frontmatter, 'applies_to');
-        return appliesTo.length === 0 || appliesTo.includes(platform);
-      }),
-    )
+  const semanticCandidates = state.semanticRequired.filter((path) => {
+    const doc = docs.find((candidate) => candidate.path === path);
+    return Boolean(doc) && appliesToPlatform(doc as KnowledgeDoc, platform);
+  });
+  const missing = requiredReadingForTool(docs, platform, baseName, {
+    semanticCandidates,
+    includeTopical: carriesTopicalRequirements(baseName),
+  })
     .filter((path, index, all) => all.indexOf(path) === index)
-    .filter((path) => !read.has(path));
+    .filter((path) => !read.has(path))
+    .slice(0, MAX_REQUIRED_PER_CALL);
   // Client notes that never made it into context (too large at session start)
   // are required reading too — the model must not analyze or mutate a client's
   // account while blind to the client's profile, preferences and decision log.
   const needsClient = state.clientNotesPending === true && !state.currentClient && clientSlugs.length > 0;
   if (missing.length === 0 && !needsClient) return null;
 
-  const denies = state.denies[platform] || 0;
+  // A deny only counts towards the cap when the previous one changed nothing:
+  // the cap guards against a session that CANNOT read (no MCP server), not
+  // against one that reads what it was asked for and then reaches a different
+  // operation with different requirements.
+  const readsNow = state.readDocs.length;
+  const lastReads = state.lastDenyReads?.[platform];
+  const denies = lastReads !== undefined && readsNow > lastReads ? 0 : state.denies[platform] || 0;
   if (denies >= ENFORCE_MAX_DENIES) {
     const gaps = [
       ...(missing.length ? [`${missing.join(', ')} was never read`] : []),
@@ -582,6 +669,7 @@ function checkRequiredReading(
     };
   }
   state.denies[platform] = denies + 1;
+  state.lastDenyReads = { ...(state.lastDenyReads || {}), [platform]: readsNow };
   const steps: string[] = [];
   if (missing.length) {
     steps.push(`call ${missing.map((path) => `read_knowledge("${path}")`).join(', ')} on the marketing-context MCP server`);
@@ -836,6 +924,8 @@ function loadState(sessionId?: string): SessionState {
         tasksInjected: parsed.tasksInjected === true,
         readDocs: Array.isArray(parsed.readDocs) ? parsed.readDocs : [],
         denies: parsed.denies && typeof parsed.denies === 'object' ? parsed.denies : {},
+        lastDenyReads: parsed.lastDenyReads && typeof parsed.lastDenyReads === 'object' ? parsed.lastDenyReads : {},
+        platforms: Array.isArray(parsed.platforms) ? parsed.platforms : [],
         clientNotesPending: parsed.clientNotesPending === true,
         currentClient: typeof parsed.currentClient === 'string' ? parsed.currentClient : undefined,
         semanticRequired: Array.isArray(parsed.semanticRequired) ? parsed.semanticRequired : [],
@@ -844,7 +934,7 @@ function loadState(sessionId?: string): SessionState {
       // fall through to fresh state
     }
   }
-  return { round: 0, injected: [], readDocs: [], denies: {}, semanticRequired: [] };
+  return { round: 0, injected: [], readDocs: [], denies: {}, lastDenyReads: {}, platforms: [], semanticRequired: [] };
 }
 
 function saveState(sessionId: string | undefined, state: SessionState) {

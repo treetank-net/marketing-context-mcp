@@ -272,10 +272,14 @@ export function selectSessionStartGeneric(docs: KnowledgeDoc[], opts: SelectOpti
 
 /** Select docs wired to a specific tool via trigger_tools, ordered by priority. */
 export function selectForTool(docs: KnowledgeDoc[], toolName: string, opts: SelectOptions = {}): KnowledgeDoc[] {
-  const { limit = 2, exclude } = opts;
+  const { limit = 2, exclude, platforms } = opts;
   return docs
     .filter((doc) => eligibleForStage(doc, 'pre_tool'))
     .filter((doc) => !exclude?.has(doc.path))
+    // trigger_tools are bare tool names shared across platforms (both ads MCPs
+    // expose prepare_budget_change), so the platform of the call has to filter
+    // too — otherwise a Google Ads budget change pulls Meta's ABO/CBO article.
+    .filter((doc) => platformOk(doc, platforms))
     .filter((doc) => matchesTool(doc, toolName))
     .sort((a, b) => priorityOf(b) - priorityOf(a) || a.path.localeCompare(b.path))
     .slice(0, limit);
@@ -294,7 +298,127 @@ export function requiredReading(docs: KnowledgeDoc[], platform: string): Knowled
     .sort((a, b) => priorityOf(b) - priorityOf(a) || a.path.localeCompare(b.path));
 }
 
-function platformOk(doc: KnowledgeDoc, platforms?: string[]): boolean {
+// Tool-name tokens that carry no topic: the mutation protocol's verbs and its
+// scaffolding. Stripped BEFORE tokenize() because the Polish stemmer mangles
+// English verbs ("prepare" → "prepar"). What remains are the domain nouns
+// ("budget", "keywords", "sitelink") that say what the operation is about.
+const TOOL_NAME_STOPWORDS = new Set([
+  'mcp', 'plugin', 'baby', 'tool', 'tools',
+  'prepare', 'confirm', 'get', 'list', 'set', 'setup', 'update', 'create', 'add', 'remove', 'execute',
+  'all', 'full', 'entity', 'from', 'file', 'url', 'blueprint',
+  'mutation', 'mutations', 'safe', 'word', 'pending', 'history', 'stats', 'auth',
+]);
+
+/**
+ * Topic terms carried by a tool name. `mcp__google-ads__prepare_budget_change`
+ * → ["budget", "chang"]: the platform prefix and the protocol verbs drop out,
+ * the domain nouns go through the same stem pipeline as document tokens.
+ */
+export function toolTerms(toolName: string): string[] {
+  const base = (toolName.split('__').pop() || toolName).toLowerCase();
+  const words = base
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean)
+    .filter((word) => !TOOL_NAME_STOPWORDS.has(word));
+  return [...new Set(tokenize(words.join(' ')))];
+}
+
+/**
+ * True when a document is about the operation the tool performs. Two curated
+ * signals only: the author wired the tool into `trigger_tools`, or a domain
+ * noun from the tool name lands in the title, keywords or path. A body-only
+ * hit does not count — that is what turned a budget change into a demand to
+ * read the Looker Studio hygiene workflow.
+ */
+export function isTopicalForTool(doc: KnowledgeDoc, toolName: string, terms: string[]): boolean {
+  if (matchesTool(doc, toolName)) return true;
+  if (terms.length === 0) return false;
+  const scored = scoreDocDetailed(doc, terms);
+  return scored.titleHit || scored.keywordHit || scored.pathHit;
+}
+
+/**
+ * A recurring review routine (`default_schedule`) — the library's task
+ * templates: daily check, weekly feed health, monthly review, reporting
+ * refresh. They describe work to SCHEDULE, not preflight reading for a single
+ * operation, so they are never required by the gate unless the author wired
+ * them to the tool explicitly. This is why creating a Search campaign no longer
+ * demands the Merchant Center feed workflow.
+ */
+export function isRecurringWorkflow(doc: KnowledgeDoc): boolean {
+  const schedule = doc.frontmatter.default_schedule;
+  return schedule !== undefined && schedule !== null && String(schedule).trim() !== '';
+}
+
+/** A document may be enforced for a platform when its applies_to covers it (or says nothing). */
+export function appliesToPlatform(doc: KnowledgeDoc, platform: string): boolean {
+  const appliesTo = frontmatterList(doc.frontmatter, 'applies_to');
+  return appliesTo.length === 0 || appliesTo.includes(platform);
+}
+
+export interface RequiredReadingOptions {
+  /** Paths the semantic ranker flagged this session; a ranking bonus, never a licence on its own. */
+  semanticCandidates?: string[];
+  /** Add operation-specific articles on top of the platform baseline. */
+  includeTopical?: boolean;
+  topicalLimit?: number;
+}
+
+const TOPICAL_REQUIRED_LIMIT = 2;
+const SEMANTIC_RANK_BONUS = 3;
+
+/**
+ * The ordered set of articles an operation must rest on, as paths.
+ *
+ * Two tiers. The baseline is the platform's `enforce_read` ground rules — the
+ * always/never list — and holds for every tool on that platform. The topical
+ * tier is derived from the TOOL NAME, so a budget change asks for the budget
+ * article and a Search campaign asks for keywords/copywriting, deterministically
+ * and without the semantic ranker being up. Semantically ranked paths only
+ * reorder the topical tier; they can no longer make an unrelated article
+ * mandatory, which is what turned the gate into a random walk over the library.
+ */
+export function requiredReadingForTool(
+  docs: KnowledgeDoc[],
+  platform: string,
+  toolName: string,
+  opts: RequiredReadingOptions = {},
+): string[] {
+  const { semanticCandidates = [], includeTopical = true, topicalLimit = TOPICAL_REQUIRED_LIMIT } = opts;
+  const baseline = requiredReading(docs, platform).map((doc) => doc.path);
+  if (!includeTopical) return baseline;
+
+  const terms = toolTerms(toolName);
+  const candidates = new Set(semanticCandidates);
+  const topical = docs
+    .filter((doc) => !baseline.includes(doc.path))
+    .filter((doc) => appliesToPlatform(doc, platform))
+    .filter((doc) => matchesTool(doc, toolName) || !isRecurringWorkflow(doc))
+    .filter((doc) => isTopicalForTool(doc, toolName, terms))
+    .map((doc) => ({
+      doc,
+      // An article that names the tool in `trigger_tools` is the author saying
+      // "read this before this operation". That is a curated statement and it
+      // outranks any relevance inferred from the tool name — which is how ad
+      // policies keep their slot on prepare_responsive_search_ad against a
+      // search-terms review workflow that merely shares the word "search".
+      wired: matchesTool(doc, toolName) ? 1 : 0,
+      score: scoreDocDetailed(doc, terms).score + (candidates.has(doc.path) ? SEMANTIC_RANK_BONUS : 0),
+    }))
+    .sort(
+      (a, b) =>
+        b.wired - a.wired ||
+        b.score - a.score ||
+        priorityOf(b.doc) - priorityOf(a.doc) ||
+        a.doc.path.localeCompare(b.doc.path),
+    )
+    .slice(0, topicalLimit)
+    .map((item) => item.doc.path);
+
+  return [...baseline, ...topical];
+}
+
+export function platformOk(doc: KnowledgeDoc, platforms?: string[]): boolean {
   if (!platforms || platforms.length === 0) return true;
   const appliesTo = frontmatterList(doc.frontmatter, 'applies_to');
   if (appliesTo.length === 0) return true; // cross-platform / general docs stay eligible

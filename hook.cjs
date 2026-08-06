@@ -538,11 +538,86 @@ function selectSessionStartGeneric(docs, opts = {}) {
   return docs.filter((doc) => doc.frontmatter.session_start === true || priorityOf(doc) >= 5).filter((doc) => !exclude?.has(doc.path)).filter((doc) => isCrossPlatform(doc)).sort((a, b) => priorityOf(b) - priorityOf(a) || a.path.localeCompare(b.path)).slice(0, limit);
 }
 function selectForTool(docs, toolName, opts = {}) {
-  const { limit = 2, exclude } = opts;
-  return docs.filter((doc) => eligibleForStage(doc, "pre_tool")).filter((doc) => !exclude?.has(doc.path)).filter((doc) => matchesTool(doc, toolName)).sort((a, b) => priorityOf(b) - priorityOf(a) || a.path.localeCompare(b.path)).slice(0, limit);
+  const { limit = 2, exclude, platforms } = opts;
+  return docs.filter((doc) => eligibleForStage(doc, "pre_tool")).filter((doc) => !exclude?.has(doc.path)).filter((doc) => platformOk(doc, platforms)).filter((doc) => matchesTool(doc, toolName)).sort((a, b) => priorityOf(b) - priorityOf(a) || a.path.localeCompare(b.path)).slice(0, limit);
 }
 function requiredReading(docs, platform) {
   return docs.filter((doc) => doc.frontmatter.enforce_read === true).filter((doc) => frontmatterList(doc.frontmatter, "applies_to").includes(platform)).sort((a, b) => priorityOf(b) - priorityOf(a) || a.path.localeCompare(b.path));
+}
+var TOOL_NAME_STOPWORDS = /* @__PURE__ */ new Set([
+  "mcp",
+  "plugin",
+  "baby",
+  "tool",
+  "tools",
+  "prepare",
+  "confirm",
+  "get",
+  "list",
+  "set",
+  "setup",
+  "update",
+  "create",
+  "add",
+  "remove",
+  "execute",
+  "all",
+  "full",
+  "entity",
+  "from",
+  "file",
+  "url",
+  "blueprint",
+  "mutation",
+  "mutations",
+  "safe",
+  "word",
+  "pending",
+  "history",
+  "stats",
+  "auth"
+]);
+function toolTerms(toolName) {
+  const base = (toolName.split("__").pop() || toolName).toLowerCase();
+  const words = base.split(/[^a-z0-9]+/).filter(Boolean).filter((word) => !TOOL_NAME_STOPWORDS.has(word));
+  return [...new Set(tokenize(words.join(" ")))];
+}
+function isTopicalForTool(doc, toolName, terms) {
+  if (matchesTool(doc, toolName))
+    return true;
+  if (terms.length === 0)
+    return false;
+  const scored = scoreDocDetailed(doc, terms);
+  return scored.titleHit || scored.keywordHit || scored.pathHit;
+}
+function isRecurringWorkflow(doc) {
+  const schedule = doc.frontmatter.default_schedule;
+  return schedule !== void 0 && schedule !== null && String(schedule).trim() !== "";
+}
+function appliesToPlatform(doc, platform) {
+  const appliesTo = frontmatterList(doc.frontmatter, "applies_to");
+  return appliesTo.length === 0 || appliesTo.includes(platform);
+}
+var TOPICAL_REQUIRED_LIMIT = 2;
+var SEMANTIC_RANK_BONUS = 3;
+function requiredReadingForTool(docs, platform, toolName, opts = {}) {
+  const { semanticCandidates = [], includeTopical = true, topicalLimit = TOPICAL_REQUIRED_LIMIT } = opts;
+  const baseline = requiredReading(docs, platform).map((doc) => doc.path);
+  if (!includeTopical)
+    return baseline;
+  const terms = toolTerms(toolName);
+  const candidates = new Set(semanticCandidates);
+  const topical = docs.filter((doc) => !baseline.includes(doc.path)).filter((doc) => appliesToPlatform(doc, platform)).filter((doc) => matchesTool(doc, toolName) || !isRecurringWorkflow(doc)).filter((doc) => isTopicalForTool(doc, toolName, terms)).map((doc) => ({
+    doc,
+    // An article that names the tool in `trigger_tools` is the author saying
+    // "read this before this operation". That is a curated statement and it
+    // outranks any relevance inferred from the tool name — which is how ad
+    // policies keep their slot on prepare_responsive_search_ad against a
+    // search-terms review workflow that merely shares the word "search".
+    wired: matchesTool(doc, toolName) ? 1 : 0,
+    score: scoreDocDetailed(doc, terms).score + (candidates.has(doc.path) ? SEMANTIC_RANK_BONUS : 0)
+  })).sort((a, b) => b.wired - a.wired || b.score - a.score || priorityOf(b.doc) - priorityOf(a.doc) || a.doc.path.localeCompare(b.doc.path)).slice(0, topicalLimit).map((item) => item.doc.path);
+  return [...baseline, ...topical];
 }
 function platformOk(doc, platforms) {
   if (!platforms || platforms.length === 0)
@@ -561,6 +636,8 @@ function hookCfg() {
 var SHARD_LIMIT = 9e3;
 var MUTATION_TOOLS = ["confirm_mutation", "confirm_all_mutations"];
 var ENFORCE_MAX_DENIES = 3;
+var MAX_REQUIRED_PER_CALL = 3;
+var SEMANTIC_REQUIRED_MEMORY = 12;
 var SEMANTIC_TIMEOUT_MS = Number(process.env.MARKETING_CONTEXT_SEMANTIC_TIMEOUT_MS || 350);
 var SEMANTIC_INJECT = Number(process.env.MARKETING_CONTEXT_SEMANTIC_INJECT || 0.45);
 var SEMANTIC_ENFORCE = Number(process.env.MARKETING_CONTEXT_SEMANTIC_ENFORCE || 0.6);
@@ -589,16 +666,25 @@ async function main() {
     } else if (event === "UserPromptSubmit") {
       state.round += 1;
       const prompt = String(input.prompt || "");
-      const platforms = detectPlatforms(prompt);
+      const promptPlatforms = detectPlatforms(prompt);
+      for (const name of promptPlatforms) {
+        if (!state.platforms.includes(name))
+          state.platforms.push(name);
+      }
+      const platforms = promptPlatforms.length > 0 ? promptPlatforms : state.platforms;
       const semantic = await semanticRank(input, prompt);
       const scored = selectForPromptScored(docs, prompt, { platforms, exclude, limit: 3 });
       const picked = scored.filter((s) => s.confident).map((s) => s.doc);
-      const semanticPicked = semantic.filter((match) => match.similarity >= SEMANTIC_INJECT).map((match) => docs.find((doc) => doc.path === match.path)).filter((doc) => Boolean(doc)).filter((doc) => !exclude.has(doc.path)).filter((doc) => !picked.some((d) => d.path === doc.path));
+      const semanticPicked = semantic.filter((match) => match.similarity >= SEMANTIC_INJECT).map((match) => docs.find((doc) => doc.path === match.path)).filter((doc) => Boolean(doc)).filter((doc) => !exclude.has(doc.path)).filter((doc) => platformOk(doc, platforms)).filter((doc) => !picked.some((d) => d.path === doc.path));
       picked.push(...semanticPicked.slice(0, 3));
       for (const match of semantic.filter((m) => m.similarity >= SEMANTIC_ENFORCE)) {
+        const doc = docs.find((candidate) => candidate.path === match.path);
+        if (!doc || !platformOk(doc, platforms))
+          continue;
         if (!state.semanticRequired.includes(match.path))
           state.semanticRequired.push(match.path);
       }
+      state.semanticRequired = state.semanticRequired.slice(-SEMANTIC_REQUIRED_MEMORY);
       debugLog(input.session_id, "prompt-scoring", {
         round: state.round,
         prompt: prompt.slice(0, 200),
@@ -608,8 +694,12 @@ async function main() {
         semanticRequired: state.semanticRequired
       });
       if (state.round === 1 && !state.tocInjected) {
-        text = renderKnowledgeToc(docs, state, capacity);
+        text = await appendActiveTasks("", cfg, state, platforms, prompt, capacity);
         text = appendClientNotes(text, await renderClientNotes(cfg, state, capacity - text.length));
+        const toc = renderKnowledgeToc(docs, state, capacity - text.length);
+        text = text && toc ? `${text}
+
+${toc}` : text || toc;
         saveState(input.session_id, state);
         const chunks2 = splitIntoChunks(text.trim(), shards);
         writeFollowerChunks(event, input.session_id, chunks2, shards);
@@ -623,28 +713,13 @@ async function main() {
       }
       const platformStart = selectForSessionStart(docs, { platforms, exclude, limit: 4 }).filter((doc) => platforms.length > 0).filter((doc) => !picked.some((d) => d.path === doc.path));
       picked.unshift(...platformStart);
-      text = renderDocs(picked, state, capacity);
+      text = await appendActiveTasks("", cfg, state, platforms, prompt, capacity);
+      const docsBlock = renderDocs(picked, state, capacity - text.length);
+      text = text && docsBlock ? `${text}
+
+${docsBlock}` : text || docsBlock;
       if (state.round === 1) {
         text = appendClientNotes(text, await renderClientNotes(cfg, state, capacity - text.length));
-      }
-      const wantsTasks = TASK_INTENT_RE.test(prompt);
-      if (!state.tasksInjected || wantsTasks) {
-        const filter = {};
-        if (state.currentClient)
-          filter.client_slug = state.currentClient;
-        let tasks = await listDueTasks(cfg, filter);
-        if (!state.currentClient && platforms.length > 0) {
-          tasks = tasks.filter((t) => !t.platform || platforms.includes(t.platform));
-        }
-        if (tasks.length > 0 && (state.currentClient || platforms.length > 0 || wantsTasks)) {
-          const block = renderTasks(tasks.slice(0, 5), capacity - text.length);
-          if (block) {
-            text = text ? `${text}
-
-${block}` : block;
-            state.tasksInjected = true;
-          }
-        }
       }
     } else if (event === "PreToolUse") {
       const toolName = String(input.tool_name || "");
@@ -659,7 +734,12 @@ ${block}` : block;
         }
         text = gate.reason;
       } else {
-        const picked = selectForTool(docs, toolName, { exclude, limit: 3 });
+        const platform = platformOfTool(toolName);
+        const picked = selectForTool(docs, toolName, {
+          exclude,
+          limit: 3,
+          platforms: platform ? [platform] : void 0
+        });
         text = renderDocs(picked, state, capacity);
       }
     } else if (event === "PostToolUse") {
@@ -676,7 +756,11 @@ ${block}` : block;
       }
       text = renderPostToolReminder(toolName);
     }
-  } catch {
+  } catch (error) {
+    debugLog(input.session_id, "hook-error", {
+      message: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : void 0
+    });
     process.exit(0);
   }
   saveState(input.session_id, state);
@@ -835,6 +919,27 @@ function renderKnowledgeToc(docs, state, budget = SHARD_LIMIT) {
   return lines.join("\n");
 }
 var TASK_INTENT_RE = /what.*(should|to).*(do|next)|what'?s\s+due|to-?do|due tasks?|open tasks?|run a review|\bzadani|zaleg|otwarte zadan|co\s+(mam|robi|robimy|dalej|teraz)|przegl[aą]d/i;
+async function appendActiveTasks(base, cfg, state, platforms, prompt, capacity) {
+  const wantsTasks = TASK_INTENT_RE.test(prompt);
+  if (state.tasksInjected && !wantsTasks)
+    return base;
+  const filter = {};
+  if (state.currentClient)
+    filter.client_slug = state.currentClient;
+  let tasks = await listDueTasks(cfg, filter);
+  if (!state.currentClient && platforms.length > 0) {
+    tasks = tasks.filter((t) => !t.platform || platforms.includes(t.platform));
+  }
+  if (tasks.length === 0 || !state.currentClient && platforms.length === 0 && !wantsTasks)
+    return base;
+  const block = renderTasks(tasks.slice(0, 5), capacity - base.length);
+  if (!block)
+    return base;
+  state.tasksInjected = true;
+  return base ? `${base}
+
+${block}` : block;
+}
 function renderTasks(tasks, budget) {
   if (tasks.length === 0)
     return "";
@@ -918,6 +1023,16 @@ ${redactSecrets(note.content)}`);
 }
 var GATE_EXEMPT_EXACT = ["update_plugin", "list_accounts", "list_ad_accounts", "get_safety_setup"];
 var GATE_EXEMPT_PREFIX = ["setup_"];
+function platformOfTool(toolName) {
+  if (toolName.includes("google-ads"))
+    return "google-ads";
+  if (toolName.includes("meta-ads"))
+    return "meta-ads";
+  return "";
+}
+function carriesTopicalRequirements(baseName) {
+  return baseName.startsWith("prepare_");
+}
 function checkRequiredReading(docs, toolName, state, clientSlugs = []) {
   if (!isEnabled(hookCfg(), "enforce_required_reading"))
     return null;
@@ -926,21 +1041,24 @@ function checkRequiredReading(docs, toolName, state, clientSlugs = []) {
     return null;
   if (GATE_EXEMPT_PREFIX.some((prefix) => baseName.startsWith(prefix)))
     return null;
-  const platform = toolName.includes("google-ads") ? "google-ads" : toolName.includes("meta-ads") ? "meta-ads" : "";
+  const platform = platformOfTool(toolName);
   if (!platform)
     return null;
   const read = new Set(state.readDocs);
-  const missing = requiredReading(docs, platform).map((doc) => doc.path).concat(state.semanticRequired.filter((path) => {
+  const semanticCandidates = state.semanticRequired.filter((path) => {
     const doc = docs.find((candidate) => candidate.path === path);
-    if (!doc)
-      return false;
-    const appliesTo = frontmatterList(doc.frontmatter, "applies_to");
-    return appliesTo.length === 0 || appliesTo.includes(platform);
-  })).filter((path, index, all) => all.indexOf(path) === index).filter((path) => !read.has(path));
+    return Boolean(doc) && appliesToPlatform(doc, platform);
+  });
+  const missing = requiredReadingForTool(docs, platform, baseName, {
+    semanticCandidates,
+    includeTopical: carriesTopicalRequirements(baseName)
+  }).filter((path, index, all) => all.indexOf(path) === index).filter((path) => !read.has(path)).slice(0, MAX_REQUIRED_PER_CALL);
   const needsClient = state.clientNotesPending === true && !state.currentClient && clientSlugs.length > 0;
   if (missing.length === 0 && !needsClient)
     return null;
-  const denies = state.denies[platform] || 0;
+  const readsNow = state.readDocs.length;
+  const lastReads = state.lastDenyReads?.[platform];
+  const denies = lastReads !== void 0 && readsNow > lastReads ? 0 : state.denies[platform] || 0;
   if (denies >= ENFORCE_MAX_DENIES) {
     const gaps = [
       ...missing.length ? [`${missing.join(", ")} was never read`] : [],
@@ -954,6 +1072,7 @@ function checkRequiredReading(docs, toolName, state, clientSlugs = []) {
     };
   }
   state.denies[platform] = denies + 1;
+  state.lastDenyReads = { ...state.lastDenyReads || {}, [platform]: readsNow };
   const steps = [];
   if (missing.length) {
     steps.push(`call ${missing.map((path) => `read_knowledge("${path}")`).join(", ")} on the marketing-context MCP server`);
@@ -1162,6 +1281,8 @@ function loadState(sessionId) {
         tasksInjected: parsed.tasksInjected === true,
         readDocs: Array.isArray(parsed.readDocs) ? parsed.readDocs : [],
         denies: parsed.denies && typeof parsed.denies === "object" ? parsed.denies : {},
+        lastDenyReads: parsed.lastDenyReads && typeof parsed.lastDenyReads === "object" ? parsed.lastDenyReads : {},
+        platforms: Array.isArray(parsed.platforms) ? parsed.platforms : [],
         clientNotesPending: parsed.clientNotesPending === true,
         currentClient: typeof parsed.currentClient === "string" ? parsed.currentClient : void 0,
         semanticRequired: Array.isArray(parsed.semanticRequired) ? parsed.semanticRequired : []
@@ -1169,7 +1290,7 @@ function loadState(sessionId) {
     } catch {
     }
   }
-  return { round: 0, injected: [], readDocs: [], denies: {}, semanticRequired: [] };
+  return { round: 0, injected: [], readDocs: [], denies: {}, lastDenyReads: {}, platforms: [], semanticRequired: [] };
 }
 function saveState(sessionId, state) {
   const path = statePath(sessionId);

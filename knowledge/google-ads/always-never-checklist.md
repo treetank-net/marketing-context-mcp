@@ -4,6 +4,7 @@ applies_to: [google-ads]
 task_type: [checklist, workflow]
 trigger_stage: [prompt]
 priority: 5
+enforce_read: true
 inject: summary
 related: [google-ads/account-hygiene-diagnostics.md, google-ads/conversions-analytics-tracking.md, google-ads/budget-scaling-seasonality.md]
 source: ["https://support.google.com/google-ads/answer/9061546", "https://support.google.com/google-ads/answer/11461796", "https://support.google.com/google-ads/answer/6385083"]

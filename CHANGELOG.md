@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.12.1 — 2026-08-06
+
+- Required-reading gate follows the tool being called instead of the session's
+  chatter. Requirements come in two tiers: the platform's `enforce_read`
+  baseline (every ads tool) and a topical tier derived from the tool name
+  (`prepare_*` only) — `prepare_budget_change` asks for the budget article,
+  `prepare_search_campaign_full` for keywords/copywriting. Semantically ranked
+  paths now only reorder the topical tier; they can no longer make an unrelated
+  article mandatory.
+- `confirm_*` carries the platform baseline only. The second phase of an
+  operation whose `prepare_*` already passed the gate must not introduce new
+  reading between the preview and its execution.
+- An article wired to the tool through `trigger_tools` outranks anything matched
+  by tool-name relevance, and recurring review workflows (`default_schedule` —
+  daily check, weekly feed health, reporting refresh) are never required before
+  an operation unless wired explicitly: they are task templates to schedule, not
+  preflight reading.
+- At most three articles are demanded per call; the rest is deferred to the next
+  call, not dropped. A deny only counts towards the open-the-gate cap when the
+  previous deny changed nothing — a session that keeps reading is no longer
+  pushed towards the warn-through path.
+- Injection is platform-scoped everywhere: semantic prompt matches and
+  `trigger_tools` pre-tool matches are filtered by the platform in play, and the
+  session remembers it, so a Google Ads session stops receiving Meta articles.
+- `google-ads/always-never-checklist.md` is marked `enforce_read: true`. Google
+  Ads had no deterministic baseline at all — its gate depended on the semantic
+  ranker being up; Meta already had one.
+
 ## 0.12.0 — 2026-08-06
 
 - `read_knowledge` returns the article as plain markdown instead of a JSON
