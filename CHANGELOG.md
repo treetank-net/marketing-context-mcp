@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.2 — 2026-08-06
+
+- Synchronized the Claude, Codex, marketplace, and update-stamp metadata with
+  the package version and declared the shared `skills/` plugin path.
+- Documented the global `release-compat` gate so releases inspect and confirm
+  repository-specific procedures before any external action.
+
 ## 0.12.1 — 2026-08-06
 
 - Required-reading gate follows the tool being called instead of the session's

@@ -115,7 +115,8 @@ their sources and follow [the provenance policy](docs/knowledge-provenance-polic
 Historical third-party attribution is recorded in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-Before a release, run:
+Before a release, use the global `release-compat` skill to inspect and confirm
+the repository procedure, then run:
 
 ```sh
 PROVENANCE_STRICT=1 npm run audit:provenance
