@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.12.3 — 2026-08-06
+
+- Updated the MCP SDK and transitive dependencies to remove current high and
+  moderate npm security advisories, then rebuilt the runtime bundle.
+
 ## 0.12.2 — 2026-08-06
 
 - Synchronized the Claude, Codex, marketplace, and update-stamp metadata with
