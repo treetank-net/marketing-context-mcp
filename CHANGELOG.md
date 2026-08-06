@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.12.0 — 2026-08-06
+
+- `read_knowledge` returns the article as plain markdown instead of a JSON
+  envelope with escaped newlines: path header, body, and a short footer with
+  `related` and `source`. Router-only frontmatter (summary, keywords,
+  applies_to, task_type, priority, inject, trigger_*) is stripped — it cost
+  roughly a fifth of every article and duplicated what the hook already
+  injects. A title is synthesized only when the body has no H1 of its own.
+- `search_knowledge` and `list_knowledge` return compact text lines
+  (`path — title` plus the summary) instead of JSON arrays, with an explicit
+  message when nothing matches.
+- Smoke suite covers the new rendering: markdown out, no metadata leaks, no
+  duplicated H1, original casing preserved in `source` URLs.
+
 ## Clean-source baseline — 2026-07-10
 
 - Re-established the repository as a single clean-source baseline commit.

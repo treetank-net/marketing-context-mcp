@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { MarketingContextConfig } from '../config.js';
-import { collectClientContext, listKnowledgeFiles, readKnowledgeFile, safeSlug } from '../storage.js';
+import { collectClientContext, listKnowledgeFiles, readKnowledgeFile, safeSlug, type KnowledgeDoc } from '../storage.js';
 import { matchesFrontmatter, scoreDoc, tokenize } from '../retrieval.js';
 
 export function registerKnowledgeTools(server: McpServer, cfg: MarketingContextConfig) {
@@ -27,34 +27,19 @@ export function registerKnowledgeTools(server: McpServer, cfg: MarketingContextC
         .sort((a, b) => b.score - a.score || a.doc.path.localeCompare(b.doc.path))
         .slice(0, Math.min(limit ?? 10, 50));
 
-      return textResult(
-        JSON.stringify(
-          filtered.map(({ doc, score }) => ({
-            path: doc.path,
-            title: doc.title,
-            score,
-            summary: doc.frontmatter.summary,
-            keywords: doc.frontmatter.keywords,
-            applies_to: doc.frontmatter.applies_to,
-            task_type: doc.frontmatter.task_type,
-            risk_level: doc.frontmatter.risk_level,
-          })),
-          null,
-          2,
-        ),
-      );
+      return textResult(renderKnowledgeIndex(filtered.map(({ doc }) => doc), 'No knowledge article matches this query.'));
     },
   );
 
   server.tool(
     'read_knowledge',
-    'Read a markdown knowledge file by path relative to MARKETING_CONTEXT_DIR.',
+    'Read a markdown knowledge file by path relative to MARKETING_CONTEXT_DIR. Returns the article as plain markdown.',
     {
       path: z.string().describe('Relative markdown path, e.g. google-ads/always-never-checklist.md.'),
     },
     async ({ path }) => {
       const doc = await readKnowledgeFile(cfg, path);
-      return textResult(JSON.stringify(doc, null, 2));
+      return textResult(renderKnowledgeArticle(doc));
     },
   );
 
@@ -68,16 +53,8 @@ export function registerKnowledgeTools(server: McpServer, cfg: MarketingContextC
     async ({ applies_to, task_type }) => {
       const docs = (await listKnowledgeFiles(cfg))
         .filter((doc) => matchesFrontmatter(doc.frontmatter, 'applies_to', applies_to))
-        .filter((doc) => matchesFrontmatter(doc.frontmatter, 'task_type', task_type))
-        .map((doc) => ({
-          path: doc.path,
-          title: doc.title,
-          summary: doc.frontmatter.summary,
-          keywords: doc.frontmatter.keywords,
-          applies_to: doc.frontmatter.applies_to,
-          task_type: doc.frontmatter.task_type,
-        }));
-      return textResult(JSON.stringify(docs, null, 2));
+        .filter((doc) => matchesFrontmatter(doc.frontmatter, 'task_type', task_type));
+      return textResult(renderKnowledgeIndex(docs, 'No knowledge articles stored.'));
     },
   );
 
@@ -129,4 +106,50 @@ export function registerKnowledgeTools(server: McpServer, cfg: MarketingContextC
 
 function textResult(text: string) {
   return { content: [{ type: 'text' as const, text }] };
+}
+
+/**
+ * Frontmatter values with their original case preserved — URLs and § refs in
+ * `source` must not be lowercased the way retrieval's frontmatterList does.
+ */
+function frontmatterValues(frontmatter: KnowledgeDoc['frontmatter'], key: string): string[] {
+  const value = frontmatter[key];
+  if (Array.isArray(value)) return value.map((item) => String(item).trim()).filter(Boolean);
+  if (value === undefined || value === null || value === '') return [];
+  const single = String(value).trim();
+  return single ? [single] : [];
+}
+
+/**
+ * Render an article as plain markdown, not JSON. Everything the reader needs is
+ * the body; the rest of the frontmatter (summary, keywords, applies_to,
+ * task_type, intent, priority, inject, trigger_*) is retrieval-router metadata
+ * that costs ~22% of the article and tells a reader nothing — and `summary` is
+ * a verbatim repeat of what the hook already injected. Only `related` and
+ * `source` survive, as a short footer, because they are how a reader navigates
+ * on from here.
+ */
+export function renderKnowledgeArticle(doc: KnowledgeDoc): string {
+  const body = doc.body.trim();
+  // Nearly every article opens with its own H1; only synthesize one when it does not.
+  const heading = /^#\s+\S/.test(body) ? '' : `# ${doc.title}\n\n`;
+  const footer = ([
+    { label: 'Related', values: frontmatterValues(doc.frontmatter, 'related') },
+    { label: 'Sources', values: frontmatterValues(doc.frontmatter, 'source') },
+  ])
+    .filter((line) => line.values.length > 0)
+    .map((line) => `${line.label}: ${line.values.join(', ')}`);
+
+  return [`Path: ${doc.path}`, '', `${heading}${body}`, ...(footer.length ? ['', '---', ...footer] : [])].join('\n');
+}
+
+/** Compact index lines for search/list results: path, title, summary — nothing the router needs but a reader does not. */
+function renderKnowledgeIndex(docs: KnowledgeDoc[], emptyMessage: string): string {
+  if (docs.length === 0) return emptyMessage;
+  return docs
+    .map((doc) => {
+      const summary = String(doc.frontmatter.summary || '').trim();
+      return `${doc.path} — ${doc.title}${summary ? `\n  ${summary}` : ''}`;
+    })
+    .join('\n');
 }

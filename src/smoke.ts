@@ -82,6 +82,60 @@ if (cfgOut.status !== 'ok') throw new Error(`update_config failed: ${JSON.string
 if ((layered.knowledgeMode as string) !== 'plugin' || layered.settings.debug !== true) throw new Error('update_config did not apply to live config.');
 if (readKnowledgeMode(overlayDir) !== 'plugin') throw new Error('update_config did not persist knowledge_mode.');
 
+// --- knowledge tools: plain markdown out, router metadata stripped ---
+const knowledgeDir = await mkdtemp(join(tmpdir(), 'marketing-context-knowledge-'));
+await mkdir(join(knowledgeDir, 'google-ads'), { recursive: true });
+await writeFile(
+  join(knowledgeDir, 'google-ads', 'rendered.md'),
+  [
+    '---',
+    'keywords: [budget, scaling]',
+    'applies_to: [google-ads]',
+    'task_type: [workflow]',
+    'priority: 4',
+    'inject: summary',
+    'related: [google-ads/other.md, general/philosophy.md]',
+    'source: ["https://example.test/doc", "src/tools/write.ts"]',
+    'summary: "Duplicated by the hook injection; must not appear in the tool response."',
+    '---',
+    '',
+    '# Rendered article',
+    '',
+    'Body line.',
+  ].join('\n'),
+  'utf8',
+);
+await writeFile(join(knowledgeDir, 'google-ads', 'headless.md'), 'No heading here.\n', 'utf8');
+const knowledgeCfg: MarketingContextConfig = { rootDir: knowledgeDir, knowledgeMode: 'copy', settings: { ...SETTING_DEFAULTS } };
+const { registerKnowledgeTools } = await import('./tools/knowledge.js');
+const knowledgeHandlers: Record<string, (args: any) => Promise<{ content: Array<{ text: string }> }>> = {};
+registerKnowledgeTools({ tool: (name: string, _d: string, _s: unknown, h: any) => { knowledgeHandlers[name] = h; } } as any, knowledgeCfg);
+
+const article = (await knowledgeHandlers['read_knowledge']({ path: 'google-ads/rendered.md' })).content[0].text;
+if (article.trimStart().startsWith('{')) throw new Error('read_knowledge must return markdown, not JSON.');
+if (article.includes('\\n')) throw new Error('read_knowledge must not escape newlines.');
+if (!article.includes('# Rendered article\n\nBody line.')) throw new Error('read_knowledge lost the article body.');
+if (!article.includes('Path: google-ads/rendered.md')) throw new Error('read_knowledge dropped the path.');
+if (!article.includes('Related: google-ads/other.md, general/philosophy.md')) throw new Error('read_knowledge dropped related.');
+if (!article.includes('Sources: https://example.test/doc, src/tools/write.ts')) throw new Error('read_knowledge dropped sources.');
+for (const leaked of ['keywords', 'applies_to', 'task_type', 'priority', 'inject', 'Duplicated by the hook']) {
+  if (article.includes(leaked)) throw new Error(`read_knowledge leaked router metadata: ${leaked}.`);
+}
+if (article.match(/# Rendered article/g)?.length !== 1) throw new Error('read_knowledge duplicated the H1 title.');
+
+const headless = (await knowledgeHandlers['read_knowledge']({ path: 'google-ads/headless.md' })).content[0].text;
+if (!headless.includes('# headless\n\nNo heading here.')) throw new Error('read_knowledge should add a title when the body has no H1.');
+if (headless.includes('---\n')) throw new Error('read_knowledge should omit an empty footer.');
+
+const listed = (await knowledgeHandlers['list_knowledge']({})).content[0].text;
+if (listed.trimStart().startsWith('[')) throw new Error('list_knowledge must return text lines, not JSON.');
+if (!listed.includes('google-ads/rendered.md — Rendered article')) throw new Error('list_knowledge lost path/title.');
+if (listed.includes('keywords')) throw new Error('list_knowledge leaked router metadata.');
+
+const found = (await knowledgeHandlers['search_knowledge']({ query: 'rendered article', limit: 10 })).content[0].text;
+if (!found.includes('google-ads/rendered.md — Rendered article')) throw new Error('search_knowledge lost its hit.');
+if (found.trimStart().startsWith('[')) throw new Error('search_knowledge must return text lines, not JSON.');
+
 // --- tasks: storage round-trip ---
 const task = await createTask(cfg, {
   client_slug: 'acme',

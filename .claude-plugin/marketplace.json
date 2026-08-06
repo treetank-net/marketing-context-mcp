@@ -11,7 +11,7 @@
       "description": "Filesystem-backed MCP server for reusable marketing knowledge, client context, decisions, reviews, preferences, and mutation logs.",
       "name": "marketing-context-mcp",
       "source": "./",
-      "version": "0.10.0"
+      "version": "0.12.0"
     }
   ]
 }
