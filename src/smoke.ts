@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
@@ -414,6 +414,93 @@ if (blocked.includes('google-ads/product-bucketing.md')) {
 }
 await new Promise<void>((resolve) => rankServer.close(() => resolve()));
 
+// --- semantic shape: the ranking's spread decides, not the absolute cosine ---
+// Measured against the live e5 model, every prompt scores 0.79-0.86 against every
+// article, so an absolute floor admits the whole library. What separates a topical
+// prompt from an off-topic one is whether a leader stands clear of the pack. A flat
+// ranking must therefore inject nothing even though every score clears the floor.
+const shapeRoot = await mkdtemp(join(tmpdir(), 'marketing-context-shape-smoke-'));
+const shapeDiscovery = join(shapeRoot, 'embed-endpoint.json');
+await writeFile(join(shapeRoot, '.marketing-context.json'), JSON.stringify({ knowledge_mode: 'copy' }), 'utf8');
+await mkdir(join(shapeRoot, 'google-ads'), { recursive: true });
+const shapeArticles = ['alfa', 'beta', 'gamma', 'delta'].map((name) => `google-ads/${name}-note.md`);
+for (const path of shapeArticles) {
+  await writeFile(
+    join(shapeRoot, path),
+    [
+      '---',
+      `keywords: [${path.split('/')[1].replace('-note.md', '')}]`,
+      'applies_to: [google-ads]',
+      'priority: 3',
+      `summary: Notatka ${path}.`,
+      '---',
+      `# ${path}`,
+      'Body.',
+    ].join('\n'),
+    'utf8',
+  );
+}
+
+const shapeToken = 'shape-smoke-token';
+let shapeSimilarities: number[] = [];
+const shapeRankServer = createServer((req, res) => {
+  if (req.url !== '/rank' || req.headers.authorization !== `Bearer ${shapeToken}`) {
+    res.writeHead(401).end('{}');
+    return;
+  }
+  res.writeHead(200, { 'content-type': 'application/json' });
+  res.end(JSON.stringify({
+    status: 'ok',
+    matches: shapeArticles.map((path, index) => ({
+      path,
+      applies_to: ['google-ads'],
+      similarity: shapeSimilarities[index],
+    })),
+  }));
+});
+await new Promise<void>((resolve) => shapeRankServer.listen(0, '127.0.0.1', resolve));
+const shapeAddress = shapeRankServer.address();
+if (!shapeAddress || typeof shapeAddress === 'string') throw new Error('Shape smoke rank server did not bind.');
+await writeFile(shapeDiscovery, JSON.stringify({ port: shapeAddress.port, token: shapeToken }), 'utf8');
+
+const shapeEnv = {
+  MARKETING_CONTEXT_DIR: shapeRoot,
+  MARKETING_CONTEXT_EMBED_DISCOVERY: shapeDiscovery,
+  MARKETING_CONTEXT_SEMANTIC_TIMEOUT_MS: '1000',
+};
+// The first prompt of a session is the table of contents and never reaches the
+// semantic path, so both cases need a second round to observe.
+async function shapePromptRounds(similarities: number[]): Promise<string> {
+  shapeSimilarities = similarities;
+  const session = `shape-smoke-${randomUUID()}`;
+  await runHook(
+    { hook_event_name: 'UserPromptSubmit', session_id: session, prompt: 'Zaczynamy pracę w Google Ads.' },
+    shapeEnv,
+  );
+  return runHook(
+    { hook_event_name: 'UserPromptSubmit', session_id: session, prompt: 'Kontynuuj analizę Google Ads.' },
+    shapeEnv,
+  );
+}
+
+const flatShape = await shapePromptRounds([0.8, 0.8, 0.8, 0.8]);
+for (const path of shapeArticles) {
+  if (flatShape.includes(path)) {
+    throw new Error(`A flat ranking injected ${path} — every score clearing the floor is not relevance. Output: ${flatShape.slice(0, 600)}`);
+  }
+}
+
+const leaderShape = await shapePromptRounds([0.86, 0.8, 0.8, 0.8]);
+if (!leaderShape.includes(shapeArticles[0])) {
+  throw new Error(`A leader standing clear of the batch median was not injected. Output: ${leaderShape.slice(0, 600)}`);
+}
+for (const path of shapeArticles.slice(1)) {
+  if (leaderShape.includes(path)) {
+    throw new Error(`The pack around the median rode in behind the leader (${path}). Output: ${leaderShape.slice(0, 600)}`);
+  }
+}
+await new Promise<void>((resolve) => shapeRankServer.close(() => resolve()));
+
 // --- gate relevance: the required set follows the TOOL, not the session ------
 // Reproduces four defects observed in a live Google Ads session: a budget
 // change demanding the Looker Studio hygiene workflow and the benchmarks index,
@@ -663,16 +750,26 @@ if (unitConfirm.length !== 1 || unitConfirm[0] !== 'google-ads/always-never-chec
 
 console.log('smoke ok');
 
+// Must not be spawnSync: the fake /rank endpoints below live in THIS process, so a
+// synchronous child blocks the event loop that would have answered them and every
+// semantic assertion silently degrades into "the ranker timed out".
 async function runHook(payload: unknown, env: Record<string, string>): Promise<string> {
-  const result = spawnSync(process.execPath, [join(process.cwd(), 'hook.cjs')], {
+  const child = spawn(process.execPath, [join(process.cwd(), 'hook.cjs')], {
     cwd: process.cwd(),
     env: { ...process.env, ...env },
-    input: JSON.stringify(payload),
-    encoding: 'utf8',
+    stdio: ['pipe', 'pipe', 'pipe'],
   });
-  if (result.error) throw result.error;
-  if (result.status !== 0) {
-    throw new Error(`hook.cjs failed (${result.status}): ${result.stderr || result.stdout}`);
-  }
-  return result.stdout || '';
+  let stdout = '';
+  let stderr = '';
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', (chunk: string) => { stdout += chunk; });
+  child.stderr.on('data', (chunk: string) => { stderr += chunk; });
+  child.stdin.end(JSON.stringify(payload));
+  const status = await new Promise<number>((resolve, reject) => {
+    child.on('error', reject);
+    child.on('close', (code) => resolve(code ?? 0));
+  });
+  if (status !== 0) throw new Error(`hook.cjs failed (${status}): ${stderr || stdout}`);
+  return stdout;
 }

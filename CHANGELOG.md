@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.12.4 — 2026-08-07
+
+- Semantic ranking now judges the shape of the ranking, not the absolute cosine.
+  Measured against the live embedding model on this library, every prompt —
+  including "refactor the TypeScript hook code, no account work" — scores
+  0.79-0.86 against every article, so the 0.45 injection and 0.60 enforcement
+  floors sat below the entire range and admitted the whole library. A match must
+  now also stand at least 0.025 above the batch median
+  (`MARKETING_CONTEXT_SEMANTIC_MARGIN`): a topical prompt produces a leader that
+  clears the pack (~0.03), an off-topic one is flat (~0.01) and injects nothing.
+- Fixed the smoke harness running the hook with `spawnSync`, which blocked the
+  event loop of the very process hosting the fake `/rank` endpoint. Every
+  semantic ranking in the suite timed out, so all semantic assertions were
+  passing vacuously. The hook now runs asynchronously and the ranker really
+  answers.
+
 ## 0.12.3 — 2026-08-06
 
 - Updated the MCP SDK and transitive dependencies to remove current high and

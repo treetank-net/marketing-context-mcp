@@ -641,6 +641,20 @@ var SEMANTIC_REQUIRED_MEMORY = 12;
 var SEMANTIC_TIMEOUT_MS = Number(process.env.MARKETING_CONTEXT_SEMANTIC_TIMEOUT_MS || 350);
 var SEMANTIC_INJECT = Number(process.env.MARKETING_CONTEXT_SEMANTIC_INJECT || 0.45);
 var SEMANTIC_ENFORCE = Number(process.env.MARKETING_CONTEXT_SEMANTIC_ENFORCE || 0.6);
+var SEMANTIC_MARGIN = Number(process.env.MARKETING_CONTEXT_SEMANTIC_MARGIN || 0.025);
+function median(values) {
+  if (values.length === 0)
+    return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+}
+function standsOutFromBatch(matches, margin = SEMANTIC_MARGIN) {
+  if (matches.length < 3)
+    return new Set(matches.map((match) => match.path));
+  const background = median(matches.map((match) => match.similarity));
+  return new Set(matches.filter((match) => match.similarity - background >= margin).map((match) => match.path));
+}
 async function main() {
   const input = await readInput();
   if (!input)
@@ -675,9 +689,10 @@ async function main() {
       const semantic = await semanticRank(input, prompt);
       const scored = selectForPromptScored(docs, prompt, { platforms, exclude, limit: 3 });
       const picked = scored.filter((s) => s.confident).map((s) => s.doc);
-      const semanticPicked = semantic.filter((match) => match.similarity >= SEMANTIC_INJECT).map((match) => docs.find((doc) => doc.path === match.path)).filter((doc) => Boolean(doc)).filter((doc) => !exclude.has(doc.path)).filter((doc) => platformOk(doc, platforms)).filter((doc) => !picked.some((d) => d.path === doc.path));
+      const standsOut = standsOutFromBatch(semantic);
+      const semanticPicked = semantic.filter((match) => match.similarity >= SEMANTIC_INJECT && standsOut.has(match.path)).map((match) => docs.find((doc) => doc.path === match.path)).filter((doc) => Boolean(doc)).filter((doc) => !exclude.has(doc.path)).filter((doc) => platformOk(doc, platforms)).filter((doc) => !picked.some((d) => d.path === doc.path));
       picked.push(...semanticPicked.slice(0, 3));
-      for (const match of semantic.filter((m) => m.similarity >= SEMANTIC_ENFORCE)) {
+      for (const match of semantic.filter((m) => m.similarity >= SEMANTIC_ENFORCE && standsOut.has(m.path))) {
         const doc = docs.find((candidate) => candidate.path === match.path);
         if (!doc || !platformOk(doc, platforms))
           continue;
@@ -690,7 +705,8 @@ async function main() {
         prompt: prompt.slice(0, 200),
         platforms,
         scored: scored.map((s) => ({ path: s.doc.path, score: s.score, confident: s.confident })),
-        semantic: semantic.map((s) => ({ path: s.path, similarity: s.similarity })),
+        semantic: semantic.map((s) => ({ path: s.path, similarity: s.similarity, standsOut: standsOut.has(s.path) })),
+        semanticBackground: median(semantic.map((s) => s.similarity)),
         semanticRequired: state.semanticRequired
       });
       if (state.round === 1 && !state.tocInjected) {

@@ -56,6 +56,30 @@ const SEMANTIC_REQUIRED_MEMORY = 12;
 const SEMANTIC_TIMEOUT_MS = Number(process.env.MARKETING_CONTEXT_SEMANTIC_TIMEOUT_MS || 350);
 const SEMANTIC_INJECT = Number(process.env.MARKETING_CONTEXT_SEMANTIC_INJECT || 0.45);
 const SEMANTIC_ENFORCE = Number(process.env.MARKETING_CONTEXT_SEMANTIC_ENFORCE || 0.60);
+// An absolute cosine threshold cannot separate signal from noise with e5. Measured against the
+// live model on this library, every prompt — including "refactor the TypeScript hook code, no
+// account work" — scores 0.79-0.86 against every article, so 0.45 and 0.60 sit below the entire
+// range and admit everything. The usable signal is the SHAPE of the ranking: a genuinely topical
+// prompt produces a leader that stands clear of the pack ("review a PMax account and its feed"
+// puts shopping-pmax and feed-health ~0.029 above the median), while an off-topic prompt is flat
+// (~0.007-0.014). So a match must clear both the floor and this margin over the batch median.
+const SEMANTIC_MARGIN = Number(process.env.MARKETING_CONTEXT_SEMANTIC_MARGIN || 0.025);
+
+function median(values: number[]): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+}
+
+function standsOutFromBatch(matches: SemanticMatch[], margin = SEMANTIC_MARGIN): Set<string> {
+  // One match carries no distribution to compare against, so the floor alone decides.
+  if (matches.length < 3) return new Set(matches.map((match) => match.path));
+  const background = median(matches.map((match) => match.similarity));
+  return new Set(
+    matches.filter((match) => match.similarity - background >= margin).map((match) => match.path),
+  );
+}
 
 interface HookInput {
   hook_event_name?: string;
@@ -158,8 +182,9 @@ async function main() {
       // an off-topic session (coding, research, chat) must stay silent instead
       // of draining the knowledge pool doc-by-doc with MANDATORY labels.
       const picked: KnowledgeDoc[] = scored.filter((s) => s.confident).map((s) => s.doc);
+      const standsOut = standsOutFromBatch(semantic);
       const semanticPicked = semantic
-        .filter((match) => match.similarity >= SEMANTIC_INJECT)
+        .filter((match) => match.similarity >= SEMANTIC_INJECT && standsOut.has(match.path))
         .map((match) => docs.find((doc) => doc.path === match.path))
         .filter((doc): doc is KnowledgeDoc => Boolean(doc))
         .filter((doc) => !exclude.has(doc.path))
@@ -169,7 +194,7 @@ async function main() {
         .filter((doc) => platformOk(doc, platforms))
         .filter((doc) => !picked.some((d) => d.path === doc.path));
       picked.push(...semanticPicked.slice(0, 3));
-      for (const match of semantic.filter((m) => m.similarity >= SEMANTIC_ENFORCE)) {
+      for (const match of semantic.filter((m) => m.similarity >= SEMANTIC_ENFORCE && standsOut.has(m.path))) {
         const doc = docs.find((candidate) => candidate.path === match.path);
         if (!doc || !platformOk(doc, platforms)) continue;
         if (!state.semanticRequired.includes(match.path)) state.semanticRequired.push(match.path);
@@ -180,7 +205,8 @@ async function main() {
         prompt: prompt.slice(0, 200),
         platforms,
         scored: scored.map((s) => ({ path: s.doc.path, score: s.score, confident: s.confident })),
-        semantic: semantic.map((s) => ({ path: s.path, similarity: s.similarity })),
+        semantic: semantic.map((s) => ({ path: s.path, similarity: s.similarity, standsOut: standsOut.has(s.path) })),
+        semanticBackground: median(semantic.map((s) => s.similarity)),
         semanticRequired: state.semanticRequired,
       });
       if (state.round === 1 && !state.tocInjected) {
