@@ -1,6 +1,6 @@
 {
   "name": "marketing-context-mcp",
-  "version": "0.12.4",
+  "version": "0.12.5",
   "description": "Filesystem-backed MCP server for durable marketing context.",
   "author": {
     "name": "treetank",

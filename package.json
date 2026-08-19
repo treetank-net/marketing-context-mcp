@@ -1,6 +1,6 @@
 {
   "name": "@treetank/marketing-context-mcp",
-  "version": "0.12.4",
+  "version": "0.12.5",
   "description": "Filesystem-backed MCP server for reusable marketing context.",
   "type": "module",
   "main": "dist/index.js",

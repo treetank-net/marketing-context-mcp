@@ -7,12 +7,13 @@ import { registerTaskTools } from './tools/tasks.js';
 import { registerUpdateTools } from './tools/update.js';
 import { registerWriteTools } from './tools/write.js';
 import { startEmbedService } from './embed.js';
+import { PLUGIN_VERSION } from './version.js';
 
 async function main() {
   const server = new McpServer(
     {
       name: 'marketing-context',
-      version: '0.1.0',
+      version: PLUGIN_VERSION,
     },
     {
       instructions: [

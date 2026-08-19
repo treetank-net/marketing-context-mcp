@@ -1,8 +1,9 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { MarketingContextConfig } from '../config.js';
 import { copyBundledKnowledge } from '../storage.js';
+import { PLUGIN_VERSION } from '../version.js';
 
 const REPO_RAW = 'https://raw.githubusercontent.com/treetank-net/marketing-context-mcp/master';
 
@@ -10,7 +11,7 @@ function getPluginRoot(): string {
   return process.env.CLAUDE_PLUGIN_ROOT || process.cwd();
 }
 
-function getLocalVersion(): string {
+function getInstalledVersion(): string {
   try {
     const pkgPath = join(getPluginRoot(), 'package.json');
     return JSON.parse(readFileSync(pkgPath, 'utf8')).version || '0.0.0';
@@ -33,9 +34,23 @@ function getStampedVersion(): string | null {
 async function downloadFile(remotePath: string, localPath: string): Promise<boolean> {
   const res = await fetch(`${REPO_RAW}/${remotePath}`);
   if (!res.ok) return false;
-  mkdirSync(dirname(localPath), { recursive: true });
-  writeFileSync(localPath, Buffer.from(await res.arrayBuffer()));
-  return true;
+  const staging = `${localPath}.download`;
+  try {
+    mkdirSync(dirname(localPath), { recursive: true });
+    writeFileSync(staging, Buffer.from(await res.arrayBuffer()));
+    renameSync(staging, localPath);
+    return true;
+  } catch {
+    rmSync(staging, { force: true });
+    return false;
+  }
+}
+
+function restartPendingNote(installedVer: string): string {
+  return [
+    `Installed on disk: ${installedVer} — running: ${PLUGIN_VERSION}.`,
+    'Restart the session: the running server holds its bundle in memory and cannot swap it while serving this call.',
+  ].join(' ');
 }
 
 function parseSemver(version: string): number[] {
@@ -106,24 +121,33 @@ async function fetchChangelog(fromVer: string, toVer: string): Promise<string> {
 export function registerUpdateTools(server: McpServer, cfg: MarketingContextConfig) {
   server.tool(
     'update_plugin',
-    'Check for plugin updates and install them. After updating, the user must restart the session for changes to take effect.',
+    'Check for plugin updates and download them. Reports the version installed on disk separately from the version this process is actually running, because a running MCP server cannot swap its own bundle — the download only takes effect after a session restart.',
     {},
     async () => {
-      const localVer = getLocalVersion();
+      const installedVer = getInstalledVersion();
       try {
         const res = await fetch(`${REPO_RAW}/package.json`);
         if (!res.ok) {
-          return { content: [{ type: 'text' as const, text: `Cannot reach update server. Current version: ${localVer}` }] };
+          return { content: [{ type: 'text' as const, text: `Cannot reach update server. ${restartPendingNote(installedVer)}` }] };
         }
 
         const remote = (await res.json()) as { version?: string };
         const remoteVer = remote.version || '0.0.0';
-        if (remoteVer === localVer && getStampedVersion() === remoteVer) {
-          return { content: [{ type: 'text' as const, text: `Already up to date: ${localVer}` }] };
+        const installComplete = getStampedVersion() === installedVer;
+        if (!semverGt(remoteVer, installedVer) && !(remoteVer === installedVer && !installComplete)) {
+          const text = remoteVer === installedVer
+            ? (PLUGIN_VERSION === installedVer
+                ? `Already up to date and active: ${PLUGIN_VERSION}.`
+                : `Already downloaded, not yet active. ${restartPendingNote(installedVer)}`)
+            : [
+                `Nothing to install: this copy is ${installedVer}, newer than ${remoteVer} on the update server. Local files left untouched.`,
+                ...(installComplete ? [] : [`The install stamp says ${getStampedVersion() ?? 'nothing'}, so this copy may be incomplete — reinstall the plugin to repair it, since the update server only carries ${remoteVer}.`]),
+              ].join(' ');
+          return { content: [{ type: 'text' as const, text }] };
         }
 
         const root = getPluginRoot();
-        const changelog = await fetchChangelog(localVer, remoteVer);
+        const changelog = await fetchChangelog(installedVer, remoteVer);
         // Keep in sync with scripts/start-mcp.js. NOTE: this only refreshes the
         // runtime (MCP server + hook logic). Hook *registration* lives in
         // .claude-plugin/plugin.json, which Claude Code reads from the installed
@@ -158,19 +182,21 @@ export function registerUpdateTools(server: McpServer, cfg: MarketingContextConf
           }
         }
         if (ok['bundle.cjs'] && ok['hook.cjs']) {
-          writeFileSync(join(root, '.update-stamp.json'), JSON.stringify({ version: remoteVer }));
+          const stampPath = join(root, '.update-stamp.json');
+          writeFileSync(`${stampPath}.download`, JSON.stringify({ version: remoteVer }));
+          renameSync(`${stampPath}.download`, stampPath);
         }
 
         return {
           content: [{
             type: 'text' as const,
             text: [
-              `Updated ${localVer} -> ${remoteVer}`,
+              `Downloaded ${installedVer} -> ${remoteVer}`,
+              `Still running: ${PLUGIN_VERSION}. The new bundle activates on the next session start, not now.`,
               ...(changelog ? ['', "What's new:", changelog] : []),
               '',
               ...results,
               '',
-              'Restart the session for changes to take effect.',
               'If this release adds or changes hooks, also run `/plugin update` so',
               'Claude Code reloads the plugin manifest (hook registration).',
             ].join('\n'),
@@ -178,7 +204,7 @@ export function registerUpdateTools(server: McpServer, cfg: MarketingContextConf
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        return { content: [{ type: 'text' as const, text: `Update check failed: ${message}. Current version: ${localVer}` }] };
+        return { content: [{ type: 'text' as const, text: `Update check failed: ${message}. ${restartPendingNote(installedVer)}` }] };
       }
     },
   );

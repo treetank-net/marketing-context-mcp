@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.12.5 — 2026-08-19
+
+### Fixed
+- **`scripts/start-mcp.js` no longer updates the plugin code on every start.** Code updates happen only
+  through `update_plugin`; the wrapper fetches `bundle.cjs`/`hook.cjs` exactly once, when one of them is
+  missing from disk. A stale `raw.githubusercontent.com` cache used to let a start-up fetch overwrite a
+  freshly installed newer copy with older files. The `knowledge/` refresh still runs on every start — it
+  is content, not code — and `MARKETING_CONTEXT_NO_UPDATE=1` / `auto_update: false` now govern that
+  refresh only.
+- **`update_plugin` compares versions with semver ordering instead of string equality.** A copy newer than
+  the update server is left untouched with an explicit message instead of being silently downgraded; a
+  same-version install with a stale stamp is still repaired.
+- **Downloads and the install stamp are written atomically** (`<name>.download` + rename), so an
+  interrupted update leaves the previous working file instead of a truncated one.
+- **`update_plugin` reports the installed version separately from the running one.** `PLUGIN_VERSION` is
+  compiled into the bundle, so a download that has not been activated yet says so instead of reading as
+  done — a running MCP server cannot swap its own bundle.
+- **The MCP server no longer reports version `0.1.0`.** It had been hardcoded since the first release and
+  now tracks `PLUGIN_VERSION`.
+
 ## 0.12.4 — 2026-08-07
 
 - Semantic ranking now judges the shape of the ranking, not the absolute cosine.

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, renameSync, rmSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
@@ -20,24 +20,19 @@ function localVersion() {
   }
 }
 
-// The stamp certifies a COMPLETE install (written after a verified full
-// download, or committed with the repo for git checkouts). package.json alone
-// can lie: pre-0.3.1 updaters fetched it without hook.cjs, leaving installs
-// half-new forever with no version mismatch to trigger a retry.
-function stampedVersion() {
-  try {
-    return JSON.parse(readFileSync(stampPath, 'utf8')).version || null;
-  } catch {
-    return null;
-  }
-}
-
 async function download(remotePath, localPath) {
   const res = await fetch(`${REPO_RAW}/${remotePath}`);
   if (!res.ok) return false;
-  mkdirSync(dirname(localPath), { recursive: true });
-  writeFileSync(localPath, Buffer.from(await res.arrayBuffer()));
-  return true;
+  const staging = `${localPath}.download`;
+  try {
+    mkdirSync(dirname(localPath), { recursive: true });
+    writeFileSync(staging, Buffer.from(await res.arrayBuffer()));
+    renameSync(staging, localPath);
+    return true;
+  } catch {
+    rmSync(staging, { force: true });
+    return false;
+  }
 }
 
 // Knowledge articles ship with the git install but were never refreshed by
@@ -56,8 +51,9 @@ async function syncKnowledge() {
 }
 
 // Durable opt-out lives in the context dir's .marketing-context.json
-// (update_config auto_update=false); the env var stays as a kill-switch.
-function autoUpdateDisabled() {
+// (update_config auto_update=false); the env var stays as a kill-switch. It now
+// governs the knowledge refresh only — code updates never run on start.
+function knowledgeSyncDisabled() {
   if (process.env.MARKETING_CONTEXT_NO_UPDATE === '1') return true;
   try {
     const contextDir = process.env.MARKETING_CONTEXT_DIR || process.env.MARKETING_KNOWLEDGE_DIR;
@@ -69,41 +65,42 @@ function autoUpdateDisabled() {
   }
 }
 
-async function autoUpdate() {
-  if (autoUpdateDisabled()) return;
+// The stamp certifies a COMPLETE install: bundle.cjs and hook.cjs both present
+// at the recorded version. package.json alone can lie — pre-0.3.1 updaters
+// fetched it without hook.cjs, leaving installs half-new with no mismatch to
+// trigger a retry.
+// Code updates run ONLY through the update_plugin tool. A start-up fetch used
+// to overwrite freshly installed newer files with whatever raw.githubusercontent
+// had cached, so the wrapper now downloads the runtime exactly once: when there
+// is no bundle or hook on disk.
+async function fetchRuntimeOnce() {
+  process.stderr.write('marketing-context-mcp: runtime files missing, fetching them once...\n');
   try {
-    const res = await fetch(`${REPO_RAW}/package.json`);
-    if (!res.ok) return;
-    const remote = await res.json();
-    const target = remote.version || '0.0.0';
-    if (target === localVersion() && stampedVersion() === target) return;
-
-    process.stderr.write(`Updating marketing-context-mcp ${localVersion()} -> ${target}...\n`);
-
-    const okBundle = await download('bundle.cjs', bundle);
-    const okHook = await download('hook.cjs', join(root, 'hook.cjs'));
-    await download('scripts/start-mcp.js', join(root, 'scripts', 'start-mcp.js'));
-    await download('CHANGELOG.md', join(root, 'CHANGELOG.md'));
-    await syncKnowledge();
-    // package.json goes last: a crash before this point leaves the old version
-    // on disk, so the next start retries the whole download.
+    const okBundle = existsSync(bundle) || (await download('bundle.cjs', bundle));
+    const hookPath = join(root, 'hook.cjs');
+    const okHook = existsSync(hookPath) || (await download('hook.cjs', hookPath));
     await download('package.json', pkgPath);
-
     if (okBundle && okHook) {
-      writeFileSync(stampPath, JSON.stringify({ version: target }));
-      process.stderr.write(`Updated to ${target}.\n`);
+      const target = localVersion();
+      writeFileSync(`${stampPath}.download`, JSON.stringify({ version: target }));
+      renameSync(`${stampPath}.download`, stampPath);
+      process.stderr.write(`marketing-context-mcp: runtime fetched (${target}).\n`);
     } else {
-      process.stderr.write('Update incomplete (network error); will retry on next start.\n');
+      process.stderr.write('marketing-context-mcp: fetch incomplete (network error); will retry on next start.\n');
     }
   } catch {
-    // Network error: start with the local bundle.
+    // Network error: fall through to the existence check below.
   }
 }
 
-await autoUpdate();
+if (!existsSync(bundle) || !existsSync(join(root, 'hook.cjs'))) await fetchRuntimeOnce();
+
+// Knowledge articles are CONTENT, not code: they carry no version and are
+// refreshed on every start so library edits reach installs without an update.
+if (!knowledgeSyncDisabled()) await syncKnowledge();
 
 if (!existsSync(bundle)) {
-  process.stderr.write(`Missing MCP server bundle at ${bundle}.\n`);
+  process.stderr.write(`Missing MCP server bundle at ${bundle} and it could not be fetched. Reinstall the plugin.\n`);
   process.exit(1);
 }
 

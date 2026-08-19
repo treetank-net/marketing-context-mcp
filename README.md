@@ -56,7 +56,7 @@ are managed with the `update_config` tool:
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `knowledge_mode` | *(unset)* | `plugin` (layered, recommended) or `copy` (seeded once) |
-| `auto_update` | `true` | self-update the plugin runtime on server start |
+| `auto_update` | `true` | refresh the bundled `knowledge/` library on server start (code updates run only via `update_plugin`) |
 | `enforce_required_reading` | `true` | deny ads-platform tools until required articles are read |
 | `semantic_ranking` | `true` | embedding-based knowledge matching in the hook |
 | `embeddings` | `true` | local embedding service (restart to apply) |
