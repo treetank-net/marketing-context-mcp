@@ -117,20 +117,32 @@ small response instead of paging through everything.
 
 ## 6. File output
 
-`output: "file"` writes the **full**, unpaginated TSV (§2 shape) to the plugin's
-data dir (`<config-dir>/exports/<tool>-<timestamp>.tsv`) and returns only:
+`output: "file"` writes every shaped row (filters, `order_by`, `limit` and
+`fields` apply, paging does not) to `<config-dir>/exports/<table>-<timestamp>.tsv`
+and returns only:
 
 ```
-# <what> · <scope> · rows=4812 · file=/abs/path.tsv
+# <what> · <scope> · currency=<CUR> · rows=4812 · file=/abs/path.tsv
 # columns: campaign_id campaign ad_group search_term cost clicks conversions
 # totals: ...
 <first 5 rows as TSV>
 ```
 
-The agent then works with `grep`/`awk`/`duckdb` on the file. This mode is
-useful only in hosts with a shell (Claude Code, Codex, Cursor). Claude Desktop
-cannot read the file, so `inline` stays the default and the tool description
-says when `file` pays off (more than about 200 rows, or joins across reports).
+The file itself is **plain TSV, not the §2 document**, so any reader parses it
+without guessing:
+
+- UTF-8. Line 1 is the column names (the same short names as inline), then one row per line.
+- Tab-delimited, no quoting, no `#` lines. Tabs and newlines inside values become spaces.
+- Empty cell = no value. Numbers use `.` and no thousands separators; units as in §2.
+- Constant columns are **not** hoisted and all-empty columns are dropped.
+
+When a fetch cap exists (Graph pages, a GA row limit), file mode raises it to the
+largest cap the API allows, and the response header still reports any cap hit.
+
+The agent then works with `awk`/`duckdb`/`mlr`/`csv` on the file and prints only
+aggregates. This mode is useful only in hosts with a shell (Claude Code, Codex,
+Cursor). Claude Desktop cannot read the file, so `inline` stays the default and
+each plugin's manual skill documents the format with parsing examples.
 
 ## 7. Tool surface (schemas, instructions, hooks)
 
