@@ -1,7 +1,7 @@
 {
   "name": "marketing-context-mcp",
   "description": "Filesystem-backed MCP server for durable marketing context: reusable knowledge, client profiles, decisions, reviews, preferences, and confirmed mutation logs. Feedback & bug reports: Jacek Mariański (jmarianski@trans.eu)",
-  "version": "0.12.5",
+  "version": "0.13.0",
   "author": {
     "name": "Jacek Mariański",
     "email": "jmarianski@trans.eu",

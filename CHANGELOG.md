@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.13.0 — 2026-10-14
+
+### Changed — token diet
+- New `docs/response-format-contract.md`: the shared response format and size budgets for the plugin family.
+- SessionStart injection ~9.2k → ~2.4k chars; prompt injections carry path + 200-char summary; client notes injected up to 3000 chars, otherwise a pointer to `set_current_client`.
+- `set_current_client` / `get_client_context` return markdown; logs keep the last 5 entries. `list_knowledge` returns path and title only.
+- Tool descriptions ≤200 chars, compact `tools/list` (15.4k → 10.6k chars). Smoke test pins hook and listing budgets.
+
 ## 0.12.5 — 2026-08-19
 
 ### Fixed
