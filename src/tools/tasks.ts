@@ -20,10 +20,7 @@ const SOURCE_TYPE = z.enum(['knowledge', 'review', 'manual']);
 export function registerTaskTools(server: McpServer, cfg: MarketingContextConfig) {
   server.tool(
     'append_task',
-    'Record a durable operational task for a client (a stored intent the agent injects and acts on later). ' +
-      'A task should be grounded in the knowledge base: prefer source_type "knowledge" (or "review") and name the ' +
-      'knowledge article(s) it follows from, so it is never arbitrary. Point suggested_workflow at a procedural ' +
-      'knowledge article (task_type: workflow) when one applies. Stored as a Markdown file under clients/<slug>/tasks/.',
+    'Record a durable client task to act on later. Ground it in knowledge: prefer source_type knowledge or review, name the source articles, point suggested_workflow at a workflow article.',
     {
       client_slug: z.string(),
       title: z.string(),
@@ -42,7 +39,7 @@ export function registerTaskTools(server: McpServer, cfg: MarketingContextConfig
       schedule: z
         .string()
         .optional()
-        .describe('Recurrence: alias (daily/weekly/biweekly/monthly/quarterly/yearly) or 5-field cron, e.g. "0 9 * * MON"'),
+        .describe('daily/weekly/biweekly/monthly/quarterly/yearly or 5-field cron, e.g. "0 9 * * MON"'),
     },
     async (input) => {
       const task = await createTask(cfg, input);
@@ -87,9 +84,7 @@ export function registerTaskTools(server: McpServer, cfg: MarketingContextConfig
 
   server.tool(
     'mark_task_run',
-    'Record that a recurring task ran: stamps last_run and recomputes next_due from its schedule (or from an ' +
-      'explicit next_due), and appends a short run trace to the body. The detailed result should still go to ' +
-      'append_review. Use for recurring routines; for one-off tasks use update_task_status.',
+    'Record a run of a recurring task: stamps last_run, recomputes next_due, appends a trace. Put the result in append_review; use update_task_status for one-off tasks.',
     {
       task: z.string().describe('Task path or id'),
       result_summary: z.string().optional().describe('One-line outcome of this run'),
@@ -105,9 +100,7 @@ export function registerTaskTools(server: McpServer, cfg: MarketingContextConfig
 
   server.tool(
     'update_task_status',
-    'Change a task status (open/active/paused/done/deferred) and append a timestamped trace to the task body. ' +
-      'Identify the task by its path or id (from append_task / list_tasks). Record the substantive outcome with ' +
-      'append_review / append_mutation as well; this only moves the task state.',
+    'Change a task\'s status by path or id and append a trace. Only moves state; record outcomes with append_review or append_mutation.',
     {
       task: z.string().describe('Task path or id'),
       status: STATUS,
@@ -134,8 +127,7 @@ export function registerTaskTools(server: McpServer, cfg: MarketingContextConfig
 
   server.tool(
     'list_task_templates',
-    'List available task templates — workflow knowledge articles (task_type: workflow) that can be instantiated ' +
-      'as recurring/one-off client tasks. Filter by platform or intent. Use before setup_client_tasks to pick routines.',
+    'List workflow articles usable as client task templates, filtered by platform or intent. Use before setup_client_tasks.',
     {
       platform: z.string().optional(),
       intent: z.string().optional(),
@@ -156,9 +148,7 @@ export function registerTaskTools(server: McpServer, cfg: MarketingContextConfig
 
   server.tool(
     'instantiate_task_template',
-    'Create a client task from a workflow template (task_type: workflow article). Pulls platform/intent/schedule ' +
-      'defaults from the template frontmatter; the created task points suggested_workflow back at the template. ' +
-      'Recurring when a schedule (given or template default) applies.',
+    'Create a client task from a workflow template, taking platform, intent and schedule defaults from its frontmatter. Recurring when a schedule applies.',
     {
       template: z.string().describe('Path to a workflow knowledge article'),
       client_slug: z.string(),
@@ -175,9 +165,7 @@ export function registerTaskTools(server: McpServer, cfg: MarketingContextConfig
 
   server.tool(
     'setup_client_tasks',
-    'Set up a client\'s operational baseline: instantiate several workflow templates as tasks in one call. ' +
-      'Pass the template paths to enable; each becomes a task (recurring if it has a schedule). Idempotency is not ' +
-      'enforced — call list_tasks first if unsure.',
+    'Instantiate several workflow templates as client tasks in one call. Not idempotent: check list_tasks first if unsure.',
     {
       client_slug: z.string(),
       templates: z.array(z.string()).describe('Workflow template paths to enable'),

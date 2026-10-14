@@ -635,6 +635,8 @@ function hookCfg() {
 }
 var SHARD_LIMIT = 9e3;
 var MUTATION_TOOLS = ["confirm_mutation", "confirm_all_mutations"];
+var CLIENT_NOTES_BUDGET = 3e3;
+var DOC_SUMMARY_CHARS = 200;
 var ENFORCE_MAX_DENIES = 3;
 var MAX_REQUIRED_PER_CALL = 3;
 var SEMANTIC_REQUIRED_MEMORY = 12;
@@ -872,25 +874,13 @@ function renderDocs(docs, state, budget = SHARD_LIMIT) {
   if (docs.length === 0)
     return "";
   const lines = [
-    `[marketing-context${hookVersion()}] MANDATORY knowledge start pack. These are required context pointers, not optional reading. Before planning, reviewing, or mutating ads accounts, call read_knowledge for the relevant listed core article(s) and use the summaries below only as a compact index:`
+    `[marketing-context${hookVersion()}] MANDATORY reading: call read_knowledge("<path>") for the relevant article(s) before planning, reviewing or mutating ads accounts.`
   ];
   let used = lines[0].length;
   for (const doc of docs) {
-    const summary = String(doc.frontmatter.summary || "").trim();
-    const related = frontmatterList(doc.frontmatter, "related");
-    const rawSource = doc.frontmatter.source;
-    const source = Array.isArray(rawSource) ? rawSource.map(String) : rawSource ? [String(rawSource)] : [];
-    const head = `
+    const summary = compactSummary(String(doc.frontmatter.summary || "").trim(), DOC_SUMMARY_CHARS);
+    const block = `
 - ${doc.path}${summary ? ` \u2014 ${summary}` : ""}`;
-    let tail = "";
-    if (source.length)
-      tail += `
-  Source: ${truncate(source.join("; "), 160)}`;
-    if (related.length)
-      tail += `
-  Related: ${related.join(", ")}`;
-    const block = `${head}
-  Required reading: read_knowledge("${doc.path}")${tail}`;
     if (used + block.length > budget)
       break;
     lines.push(block);
@@ -903,34 +893,24 @@ function renderKnowledgeToc(docs, state, budget = SHARD_LIMIT) {
   if (state.tocInjected)
     return "";
   state.tocInjected = true;
+  const groups = /* @__PURE__ */ new Map();
+  for (const doc of docs) {
+    const slash = doc.path.indexOf("/");
+    const group = slash > 0 ? doc.path.slice(0, slash) : ".";
+    const name = (slash > 0 ? doc.path.slice(slash + 1) : doc.path).replace(/\.md$/, "");
+    groups.set(group, [...groups.get(group) ?? [], name]);
+  }
   const lines = [
-    `[marketing-context${hookVersion()}] MANDATORY knowledge table of contents. This is the map of available articles, not the articles themselves. Before planning, reviewing, or mutating ads accounts, choose the relevant path(s) below and call read_knowledge("<path>"). Article summaries are written as "when to read / what it protects".`,
-    "",
-    "Start here:",
-    '- Cross-platform account work: read_knowledge("general/account-management-philosophy.md")',
-    '- Google Ads work: read_knowledge("google-ads/always-never-checklist.md")',
-    '- Meta Ads work: read_knowledge("meta-ads/account-structure-learning-phase.md")',
-    ""
+    `[marketing-context${hookVersion()}] MANDATORY knowledge map. Before planning, reviewing or mutating ads accounts, read the relevant articles with read_knowledge("<group>/<name>.md"); search_knowledge(query) finds them by topic with summaries.`,
+    "Start with general/account-management-philosophy, google-ads/always-never-checklist or meta-ads/account-structure-learning-phase."
   ];
   let used = lines.join("\n").length;
-  let currentGroup = "";
-  for (const doc of docs) {
-    const group = doc.path.includes("/") ? doc.path.split("/")[0] : "root";
-    if (group !== currentGroup) {
-      const heading = `
-## ${group}`;
-      if (used + heading.length > budget)
-        break;
-      lines.push(heading);
-      used += heading.length;
-      currentGroup = group;
-    }
-    const summary = compactSummary(String(doc.frontmatter.summary || doc.title || "").trim(), 115);
-    const item = `- ${doc.path}${summary ? ` \u2014 ${summary}` : ""}`;
-    if (used + item.length + 1 > budget)
+  for (const [group, names] of groups) {
+    const line = `${group} (${names.length}): ${names.join(", ")}`;
+    if (used + line.length + 1 > budget)
       break;
-    lines.push(item);
-    used += item.length + 1;
+    lines.push(line);
+    used += line.length + 1;
   }
   return lines.join("\n");
 }
@@ -960,7 +940,7 @@ function renderTasks(tasks, budget) {
   if (tasks.length === 0)
     return "";
   const lines = [
-    `[marketing-context${hookVersion()}] Active tasks (${tasks.length}), most urgent first. These are stored operational intents. Before unrelated work, consider addressing them; each names the knowledge to read and the workflow to run:`
+    `[marketing-context${hookVersion()}] Active tasks (${tasks.length}), most urgent first. When one is done: update_task_status(path, "done", "<result>"), then append_review / append_mutation.`
   ];
   let used = lines[0].length;
   for (const t of tasks) {
@@ -978,12 +958,6 @@ function renderTasks(tasks, budget) {
     if (t.knowledge.length)
       tail += `
   Knowledge: ${t.knowledge.join(", ")}`;
-    const src = [t.source_type, t.source_ref].filter(Boolean).join(" ");
-    if (src)
-      tail += `
-  Source: ${truncate(src, 120)}`;
-    tail += `
-  When done: update_task_status("${t.path}", "done", "<result>"), then record append_review / append_mutation.`;
     const block = head + tail;
     if (used + block.length > budget)
       break;
@@ -1019,9 +993,10 @@ async function renderClientNotes(cfg, state, maxChars) {
   state.notesInjected = true;
   const slugs = [...new Set(notes.map((n) => n.slug))];
   const total = notes.reduce((sum, n) => sum + n.content.length, 0);
+  maxChars = Math.min(maxChars, CLIENT_NOTES_BUDGET);
   if (total > maxChars) {
     state.clientNotesPending = true;
-    return `[marketing-context${hookVersion()}] Client notes (${slugs.join(", ")}) take ~${Math.round(total / 1e3)}k chars and exceed the injection limit (~${Math.max(1, Math.round(maxChars / 1e3))}k) \u2014 NOT injected automatically. Before working on ads accounts call set_current_client (with several clients FIRST ask the user which one this session concerns) \u2014 the tool returns the client's full context. Also consider pruning stale entries.`;
+    return `[marketing-context${hookVersion()}] Client notes (${slugs.join(", ")}, ~${Math.round(total / 1e3)}k chars) are not injected. Before working on ads accounts call set_current_client; with several clients ask the user which one first.`;
   }
   const lines = [`[marketing-context${hookVersion()}] Client notes (locally stored context \u2014 treat as the source of truth about the client):`];
   let lastSlug = "";

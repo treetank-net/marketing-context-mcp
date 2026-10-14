@@ -121,7 +121,7 @@ async function fetchChangelog(fromVer: string, toVer: string): Promise<string> {
 export function registerUpdateTools(server: McpServer, cfg: MarketingContextConfig) {
   server.tool(
     'update_plugin',
-    'Check for plugin updates and download them. Reports the version installed on disk separately from the version this process is actually running, because a running MCP server cannot swap its own bundle — the download only takes effect after a session restart.',
+    'Check for and download plugin updates. Reports on-disk and running versions; a download applies only after a session restart.',
     {},
     async () => {
       const installedVer = getInstalledVersion();

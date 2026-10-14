@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { MarketingContextConfig } from '../config.js';
-import { collectClientContext, listKnowledgeFiles, readKnowledgeFile, safeSlug, type KnowledgeDoc } from '../storage.js';
+import { collectClientContext, listKnowledgeFiles, readKnowledgeFile, safeSlug, type ClientContextResult, type KnowledgeDoc } from '../storage.js';
 import { matchesFrontmatter, scoreDoc, tokenize } from '../retrieval.js';
 
 export function registerKnowledgeTools(server: McpServer, cfg: MarketingContextConfig) {
@@ -45,7 +45,7 @@ export function registerKnowledgeTools(server: McpServer, cfg: MarketingContextC
 
   server.tool(
     'list_knowledge',
-    'List local marketing knowledge files with optional frontmatter filters.',
+    'List knowledge article paths and titles, optionally filtered; search_knowledge adds summaries.',
     {
       applies_to: z.string().optional(),
       task_type: z.string().optional(),
@@ -54,22 +54,20 @@ export function registerKnowledgeTools(server: McpServer, cfg: MarketingContextC
       const docs = (await listKnowledgeFiles(cfg))
         .filter((doc) => matchesFrontmatter(doc.frontmatter, 'applies_to', applies_to))
         .filter((doc) => matchesFrontmatter(doc.frontmatter, 'task_type', task_type));
-      return textResult(renderKnowledgeIndex(docs, 'No knowledge articles stored.'));
+      if (docs.length === 0) return textResult('No knowledge articles stored.');
+      return textResult(docs.map((doc) => `${doc.path} — ${doc.title}`).join('\n'));
     },
   );
 
   server.tool(
     'set_current_client',
-    'Declare which client this session works on and load their FULL stored context (profile, preferences, decision/review logs, procedures) in one call. ' +
-      'With exactly one stored client, call without arguments — it is selected automatically. ' +
-      'With several stored clients you MUST first ask the user which client this session concerns (do not guess), then call again with client_slug. ' +
-      'Calling this tool also satisfies the marketing-context required-reading gate for client context.',
+    'Select this session\'s client and load their stored context. No args with one client; with several, ask the user which one, then pass client_slug. Satisfies the client-context reading gate.',
     {
-      client_slug: z.string().optional().describe('Client slug under clients/. Omit only when a single client is stored (auto-select) or to list available clients.'),
+      client_slug: z.string().optional().describe('Client slug under clients/. Omit to auto-select the only client or to list clients.'),
     },
     async ({ client_slug }) => {
       const result = await collectClientContext(cfg, client_slug);
-      return textResult(JSON.stringify(result, null, 2));
+      return textResult(renderClientContext(result, RECENT_LOG_ENTRIES));
     },
   );
 
@@ -99,9 +97,35 @@ export function registerKnowledgeTools(server: McpServer, cfg: MarketingContextC
           // Missing optional client files are expected.
         }
       }
-      return textResult(JSON.stringify(docs, null, 2));
+      if (docs.length === 0) return textResult(`No context files stored for client "${slug}".`);
+      return textResult([`# Client: ${slug}`, ...docs.map((doc) => `## ${doc.path}\n${doc.body.trim()}`)].join('\n\n'));
     },
   );
+}
+
+const RECENT_LOG_ENTRIES = 5;
+const LOG_ENTRY_RE = /^## \d{4}-\d{2}-\d{2}/m;
+
+export function tailLogEntries(content: string, keep: number): { text: string; omitted: number } {
+  const starts: number[] = [];
+  const re = new RegExp(LOG_ENTRY_RE.source, 'gm');
+  for (let match = re.exec(content); match; match = re.exec(content)) starts.push(match.index);
+  if (starts.length <= keep) return { text: content.trim(), omitted: 0 };
+  const head = content.slice(0, starts[0]).trim();
+  const tail = content.slice(starts[starts.length - keep]).trim();
+  return { text: [head, tail].filter(Boolean).join('\n\n'), omitted: starts.length - keep };
+}
+
+export function renderClientContext(result: ClientContextResult, recentEntries: number): string {
+  if (result.status === 'no_clients') return result.message;
+  if (result.status === 'ambiguous') return `${result.message}\nClients: ${result.clients.join(', ')}`;
+  if (result.status === 'unknown_client') return `${result.message} Requested: ${result.requested}. Clients: ${result.clients.join(', ')}`;
+  const sections = result.files.map((file) => {
+    const { text, omitted } = tailLogEntries(file.content, recentEntries);
+    const note = omitted ? `\n(${omitted} older entries omitted; get_client_context returns the full log)` : '';
+    return `## ${file.path}${note}\n${text}`;
+  });
+  return [`# Current client: ${result.current_client}`, ...sections].join('\n\n');
 }
 
 function textResult(text: string) {

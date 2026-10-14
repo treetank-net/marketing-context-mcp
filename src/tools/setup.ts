@@ -36,9 +36,7 @@ function effectiveSettings(cfg: MarketingContextConfig) {
 export function registerSetupTools(server: McpServer, cfg: MarketingContextConfig) {
   server.tool(
     'get_context_health',
-    'Diagnose this marketing-context installation: version, context/bundled knowledge directories, knowledge mode, ' +
-      'stored + effective configuration, per-layer article counts, shadowed duplicates, and concrete advice. ' +
-      'Call this when knowledge seems missing or stale, after changing MARKETING_CONTEXT_DIR, or when the user reports the plugin misbehaving.',
+    'Diagnose the installation: version, knowledge dirs and mode, config, article counts, shadowed duplicates, advice. Use when knowledge seems missing or stale.',
     {},
     async () => {
       const [docs, shadowed, notes, dueTasks] = await Promise.all([
@@ -104,18 +102,11 @@ export function registerSetupTools(server: McpServer, cfg: MarketingContextConfi
 
   server.tool(
     'update_config',
-    'Update durable marketing-context configuration, stored in .marketing-context.json inside the context dir. ' +
-      'knowledge_mode decides how the bundled knowledge library relates to a custom MARKETING_CONTEXT_DIR: ' +
-      '"plugin" (recommended) serves bundled articles from the plugin install with the context dir as overlay; ' +
-      '"copy" seeds the library into the context dir once (existing files never overwritten) and serves it from there. ' +
-      'Ask the user before changing knowledge_mode — it is their durable choice. ' +
-      'Boolean flags: auto_update (self-update on server start), enforce_required_reading (deny ads tools until required articles are read), ' +
-      'semantic_ranking (embedding-based hook matching), embeddings (local embedding service), debug (hook decision log). ' +
-      'Legacy env vars (MARKETING_CONTEXT_NO_UPDATE, _ENFORCE, _SEMANTIC, _EMBED, _DEBUG) still act as kill-switch overrides.',
+    'Change durable settings in .marketing-context.json. Ask the user before changing knowledge_mode. Legacy MARKETING_CONTEXT_* env vars still override as kill switches.',
     {
-      knowledge_mode: z.enum(['plugin', 'copy']).optional().describe('How the bundled knowledge library is served; see tool description.'),
+      knowledge_mode: z.enum(['plugin', 'copy']).optional().describe('"plugin" (recommended): bundled library + context-dir overlay. "copy": seed it into the context dir.'),
       auto_update: z.boolean().optional().describe('Self-update the plugin runtime on server start (default true).'),
-      enforce_required_reading: z.boolean().optional().describe('Required-reading gate on ads-platform tools (default true).'),
+      enforce_required_reading: z.boolean().optional().describe('Deny ads tools until required articles are read (default true).'),
       semantic_ranking: z.boolean().optional().describe('Semantic (embedding) knowledge matching in the hook (default true).'),
       embeddings: z.boolean().optional().describe('Local embedding service on the MCP server (default true; restart to apply).'),
       debug: z.boolean().optional().describe('Hook decision debug log (default false).'),

@@ -6,6 +6,7 @@ import { registerSetupTools } from './tools/setup.js';
 import { registerTaskTools } from './tools/tasks.js';
 import { registerUpdateTools } from './tools/update.js';
 import { registerWriteTools } from './tools/write.js';
+import { compactToolListing } from './compact-listing.js';
 import { startEmbedService } from './embed.js';
 import { PLUGIN_VERSION } from './version.js';
 
@@ -33,6 +34,7 @@ async function main() {
   registerWriteTools(server, cfg);
   registerTaskTools(server, cfg);
   registerUpdateTools(server, cfg);
+  compactToolListing(server);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

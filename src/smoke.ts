@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { renderClientContext, tailLogEntries } from './tools/knowledge.js';
 import { readKnowledgeMode, SETTING_DEFAULTS, type MarketingContextConfig } from './config.js';
 import { appendJsonl, appendMarkdownLog, appendTaskNote, computeNextDue, copyBundledKnowledge, createTask, detectShadowedKnowledge, listClientNotes, listDueTasks, listKnowledgeFiles, listTasks, markTaskRun, readKnowledgeFile, resolveInsideRoot, updateContextSettings, updateTaskStatus, upsertMarkdownSection } from './storage.js';
 
@@ -625,7 +626,8 @@ async function readKnowledge(path: string): Promise<void> {
 
 // Observation 4: a Google Ads session must not be handed Meta articles, however
 // confidently the platform-blind ranker returns them.
-await runHook({ hook_event_name: 'SessionStart', session_id: gateSession }, gateEnv);
+const sessionStart = await runHook({ hook_event_name: 'SessionStart', session_id: gateSession }, gateEnv);
+if (sessionStart.length > 3000) throw new Error(`SessionStart injection over budget: ${sessionStart.length} chars (limit 3000).`);
 const gatePrompt = await runHook(
   { hook_event_name: 'UserPromptSubmit', session_id: gateSession, prompt: 'Podnieś budżet dzienny kampanii Search w Google Ads o 20%.' },
   gateEnv,
@@ -748,6 +750,19 @@ if (unitConfirm.length !== 1 || unitConfirm[0] !== 'google-ads/always-never-chec
   throw new Error(`confirm_* should require the baseline only: ${unitConfirm.join(', ')}`);
 }
 
+// --- token budgets (docs/response-format-contract.md §8) ---
+const longLog = ['# Decision log', ...Array.from({ length: 8 }, (_, i) => `## 2026-01-0${i + 1}\nentry ${i + 1}`)].join('\n\n');
+const tailed = tailLogEntries(longLog, 5);
+if (tailed.omitted !== 3 || tailed.text.includes('entry 3') || !tailed.text.includes('entry 8') || !tailed.text.startsWith('# Decision log')) {
+  throw new Error(`tailLogEntries kept the wrong entries: ${JSON.stringify(tailed)}`);
+}
+const rendered = renderClientContext({ status: 'ok', current_client: 'acme', files: [{ path: 'clients/acme/decision-log.md', content: longLog }] }, 5);
+if (!rendered.startsWith('# Current client: acme') || !rendered.includes('3 older entries omitted') || rendered.trimStart().startsWith('{')) {
+  throw new Error(`renderClientContext should be markdown with an omission note: ${rendered.slice(0, 300)}`);
+}
+if (gatePrompt.length > 2000) throw new Error(`UserPromptSubmit injection over budget: ${gatePrompt.length} chars (limit 2000).`);
+await checkToolListingBudget();
+
 console.log('smoke ok');
 
 // Must not be spawnSync: the fake /rank endpoints below live in THIS process, so a
@@ -772,4 +787,38 @@ async function runHook(payload: unknown, env: Record<string, string>): Promise<s
   });
   if (status !== 0) throw new Error(`hook.cjs failed (${status}): ${stderr || stdout}`);
   return stdout;
+}
+
+async function checkToolListingBudget(): Promise<void> {
+  const child = spawn(process.execPath, [join(process.cwd(), 'bundle.cjs')], {
+    cwd: process.cwd(),
+    env: { ...process.env, MARKETING_CONTEXT_DIR: rootDir, MARKETING_CONTEXT_NO_UPDATE: '1', MARKETING_CONTEXT_EMBED: '0' },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  let buffer = '';
+  child.stdout.setEncoding('utf8');
+  const listing = new Promise<{ result: { tools: Array<{ name: string; description?: string; inputSchema?: { properties?: Record<string, { description?: string }> } }> } }>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('tools/list timed out')), 15000);
+    child.stdout.on('data', (chunk: string) => {
+      buffer += chunk;
+      for (const line of buffer.split('\n').slice(0, -1)) {
+        const message = JSON.parse(line);
+        if (message.id === 2) { clearTimeout(timer); resolve(message); }
+      }
+      buffer = buffer.slice(buffer.lastIndexOf('\n') + 1);
+    });
+  });
+  const send = (message: unknown) => child.stdin.write(`${JSON.stringify(message)}\n`);
+  send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'smoke', version: '0' } } });
+  send({ jsonrpc: '2.0', method: 'notifications/initialized' });
+  send({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
+  const { result } = await listing.finally(() => child.kill());
+  const size = JSON.stringify(result.tools).length;
+  if (size > 12000) throw new Error(`tools/list over budget: ${size} chars (limit 12000).`);
+  for (const tool of result.tools) {
+    if ((tool.description ?? '').length > 200) throw new Error(`${tool.name} description over 200 chars.`);
+    for (const [name, param] of Object.entries(tool.inputSchema?.properties ?? {})) {
+      if ((param.description ?? '').length > 100) throw new Error(`${tool.name}.${name} description over 100 chars.`);
+    }
+  }
 }

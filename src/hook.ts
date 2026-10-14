@@ -43,6 +43,10 @@ import {
 // indexes, but full article bodies should not be pushed through the hook.
 const SHARD_LIMIT = 9000; // per-invocation chunk size, with margin under 10k
 const MUTATION_TOOLS = ['confirm_mutation', 'confirm_all_mutations'];
+// Injected context is paid on every following turn. Above this the notes are
+// replaced by a pointer to set_current_client, which loads them on demand.
+const CLIENT_NOTES_BUDGET = 3000;
+const DOC_SUMMARY_CHARS = 200;
 // After this many denies per platform the gate opens with a warning instead —
 // a session must never hard-lock (e.g. when the MCP server is not connected
 // and read_knowledge is simply unavailable).
@@ -409,25 +413,13 @@ function sleep(ms: number): Promise<void> {
 function renderDocs(docs: KnowledgeDoc[], state: SessionState, budget: number = SHARD_LIMIT): string {
   if (docs.length === 0) return '';
   const lines: string[] = [
-    `[marketing-context${hookVersion()}] MANDATORY knowledge start pack. These are required context pointers, not optional reading. Before planning, reviewing, or mutating ads accounts, call read_knowledge for the relevant listed core article(s) and use the summaries below only as a compact index:`,
+    `[marketing-context${hookVersion()}] MANDATORY reading: call read_knowledge("<path>") for the relevant article(s) before planning, reviewing or mutating ads accounts.`,
   ];
   let used = lines[0].length;
 
   for (const doc of docs) {
-    const summary = String(doc.frontmatter.summary || '').trim();
-    const related = frontmatterList(doc.frontmatter, 'related');
-
-    // Preserve original case for sources (URLs, § refs) — do not lowercase.
-    const rawSource = doc.frontmatter.source;
-    const source = Array.isArray(rawSource) ? rawSource.map(String) : rawSource ? [String(rawSource)] : [];
-
-    const head = `\n- ${doc.path}${summary ? ` — ${summary}` : ''}`;
-    let tail = '';
-    if (source.length) tail += `\n  Source: ${truncate(source.join('; '), 160)}`;
-    if (related.length) tail += `\n  Related: ${related.join(', ')}`;
-
-    const block = `${head}\n  Required reading: read_knowledge("${doc.path}")${tail}`;
-
+    const summary = compactSummary(String(doc.frontmatter.summary || '').trim(), DOC_SUMMARY_CHARS);
+    const block = `\n- ${doc.path}${summary ? ` — ${summary}` : ''}`;
     if (used + block.length > budget) break;
     lines.push(block);
     used += block.length;
@@ -441,33 +433,24 @@ function renderKnowledgeToc(docs: KnowledgeDoc[], state: SessionState, budget: n
   if (state.tocInjected) return '';
   state.tocInjected = true;
 
+  const groups = new Map<string, string[]>();
+  for (const doc of docs) {
+    const slash = doc.path.indexOf('/');
+    const group = slash > 0 ? doc.path.slice(0, slash) : '.';
+    const name = (slash > 0 ? doc.path.slice(slash + 1) : doc.path).replace(/\.md$/, '');
+    groups.set(group, [...(groups.get(group) ?? []), name]);
+  }
+
   const lines: string[] = [
-    `[marketing-context${hookVersion()}] MANDATORY knowledge table of contents. This is the map of available articles, not the articles themselves. Before planning, reviewing, or mutating ads accounts, choose the relevant path(s) below and call read_knowledge("<path>"). Article summaries are written as "when to read / what it protects".`,
-    '',
-    'Start here:',
-    '- Cross-platform account work: read_knowledge("general/account-management-philosophy.md")',
-    '- Google Ads work: read_knowledge("google-ads/always-never-checklist.md")',
-    '- Meta Ads work: read_knowledge("meta-ads/account-structure-learning-phase.md")',
-    '',
+    `[marketing-context${hookVersion()}] MANDATORY knowledge map. Before planning, reviewing or mutating ads accounts, read the relevant articles with read_knowledge("<group>/<name>.md"); search_knowledge(query) finds them by topic with summaries.`,
+    'Start with general/account-management-philosophy, google-ads/always-never-checklist or meta-ads/account-structure-learning-phase.',
   ];
   let used = lines.join('\n').length;
-  let currentGroup = '';
-
-  for (const doc of docs) {
-    const group = doc.path.includes('/') ? doc.path.split('/')[0] : 'root';
-    if (group !== currentGroup) {
-      const heading = `\n## ${group}`;
-      if (used + heading.length > budget) break;
-      lines.push(heading);
-      used += heading.length;
-      currentGroup = group;
-    }
-
-    const summary = compactSummary(String(doc.frontmatter.summary || doc.title || '').trim(), 115);
-    const item = `- ${doc.path}${summary ? ` — ${summary}` : ''}`;
-    if (used + item.length + 1 > budget) break;
-    lines.push(item);
-    used += item.length + 1;
+  for (const [group, names] of groups) {
+    const line = `${group} (${names.length}): ${names.join(', ')}`;
+    if (used + line.length + 1 > budget) break;
+    lines.push(line);
+    used += line.length + 1;
   }
 
   return lines.join('\n');
@@ -512,7 +495,7 @@ async function appendActiveTasks(
 function renderTasks(tasks: TaskRecord[], budget: number): string {
   if (tasks.length === 0) return '';
   const lines: string[] = [
-    `[marketing-context${hookVersion()}] Active tasks (${tasks.length}), most urgent first. These are stored operational intents. Before unrelated work, consider addressing them; each names the knowledge to read and the workflow to run:`,
+    `[marketing-context${hookVersion()}] Active tasks (${tasks.length}), most urgent first. When one is done: update_task_status(path, "done", "<result>"), then append_review / append_mutation.`,
   ];
   let used = lines[0].length;
 
@@ -524,9 +507,6 @@ function renderTasks(tasks: TaskRecord[], budget: number): string {
     if (why) tail += `\n  Why: ${truncate(why, 160)}`;
     if (t.suggested_workflow) tail += `\n  Workflow: read_knowledge("${t.suggested_workflow}")`;
     if (t.knowledge.length) tail += `\n  Knowledge: ${t.knowledge.join(', ')}`;
-    const src = [t.source_type, t.source_ref].filter(Boolean).join(' ');
-    if (src) tail += `\n  Source: ${truncate(src, 120)}`;
-    tail += `\n  When done: update_task_status("${t.path}", "done", "<result>"), then record append_review / append_mutation.`;
     const block = head + tail;
     if (used + block.length > budget) break;
     lines.push(block);
@@ -564,15 +544,14 @@ async function renderClientNotes(cfg: MarketingContextConfig, state: SessionStat
   state.notesInjected = true;
   const slugs = [...new Set(notes.map((n) => n.slug))];
   const total = notes.reduce((sum, n) => sum + n.content.length, 0);
+  maxChars = Math.min(maxChars, CLIENT_NOTES_BUDGET);
   if (total > maxChars) {
     // The model is now blind about the client — mark it so the enforcement
     // gate requires set_current_client before any ads-platform tool runs.
     state.clientNotesPending = true;
     return (
-      `[marketing-context${hookVersion()}] Client notes (${slugs.join(', ')}) take ~${Math.round(total / 1000)}k chars ` +
-      `and exceed the injection limit (~${Math.max(1, Math.round(maxChars / 1000))}k) — NOT injected automatically. ` +
-      `Before working on ads accounts call set_current_client (with several clients FIRST ask the user which one ` +
-      `this session concerns) — the tool returns the client's full context. Also consider pruning stale entries.`
+      `[marketing-context${hookVersion()}] Client notes (${slugs.join(', ')}, ~${Math.round(total / 1000)}k chars) are not injected. ` +
+      `Before working on ads accounts call set_current_client; with several clients ask the user which one first.`
     );
   }
   const lines: string[] = [`[marketing-context${hookVersion()}] Client notes (locally stored context — treat as the source of truth about the client):`];

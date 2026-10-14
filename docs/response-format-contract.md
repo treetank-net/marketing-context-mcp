@@ -47,7 +47,7 @@ Rules:
 | Column names | Short snake_case leaf names (`cost`, `clicks`, `campaign`, `campaign_id`). Prefix with the parent only to resolve a collision. Never dotted API paths like `metrics.cost_micros`. |
 | Money | Decimal in the account currency, 2 decimals. Never micros or cents. The currency appears once, in the header. |
 | Ratios | Percent with 2 decimals and a `_pct` suffix (`ctr_pct`, `bounce_rate_pct`). |
-| Other floats | At most 4 significant digits. No thousands separators. |
+| Other floats | 2 decimals when ≥ 1, otherwise 3 significant digits. No thousands separators. |
 | Enums | Always the name. An unmapped value renders as `UNKNOWN(<n>)`, never a bare number. |
 | IDs | Bare ids. No resource names (`customers/1/campaigns/2` → `2`). |
 | Dates | ISO `YYYY-MM-DD`. Timestamps ISO-8601 to the second. |
@@ -144,7 +144,7 @@ The `tools/list` payload is paid once per session before any work.
 - **Parameter descriptions** are at most about 100 chars. A concept shared by many
   tools (safe word, customer id, paging, money units) is explained once in the
   server instructions and referenced by name in the parameters.
-- **Tool descriptions** are at most about 400 chars. They say when to use the tool and
+- **Tool descriptions** are at most about 200 chars (one or two sentences; details go to a manual skill). They say when to use the tool and
   what it returns, not how the whole family works.
 - **Hooks** (`marketing-context` injections) stay within the hook budgets below
   and inject titles or pointers rather than full summaries. An unmatched prompt
@@ -161,7 +161,7 @@ tools_list.read_profile          15000
 tools_list.full_profile          45000
 server_instructions               2500
 param_description                  100
-tool_description                   400
+tool_description                   200
 response.default_page            12000
 response.page_note                 120
 prepare_response.overhead          300
