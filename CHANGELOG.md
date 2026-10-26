@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.14.0 — 2026-10-26
+
+### Added — report recipes
+
+- Added report recipes: `save_recipe` and `list_recipes` store recurring-report
+  definitions under `clients/<slug>/recipes/` for `report-baby` to execute
+  (contract: `docs/report-recipe-contract.md`).
+- The server writes its resolved context root to
+  `~/.config/marketing-context/root.json` on start so executors can find it
+  (`MARKETING_CONTEXT_LOCATOR` overrides the path).
+- Tasks accept a `recipe` field; `append_review` accepts `summary_path`.
+
 ## 0.13.0 — 2026-10-14
 
 ### Changed — token diet

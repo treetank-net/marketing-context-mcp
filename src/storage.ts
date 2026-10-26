@@ -353,6 +353,7 @@ export interface TaskInput {
   source_ref?: string;
   recurring?: boolean;
   schedule?: string;
+  recipe?: string;
 }
 
 export interface TaskRecord {
@@ -372,6 +373,7 @@ export interface TaskRecord {
   source_ref?: string;
   recurring?: boolean;
   schedule?: string;
+  recipe?: string;
   next_due?: string;
   last_run?: string;
   body: string;
@@ -389,7 +391,7 @@ export interface TaskFilter {
 const TASK_FIELD_ORDER = [
   'type', 'status', 'priority', 'client_slug', 'platform', 'account_id', 'intent',
   'due', 'suggested_workflow', 'knowledge', 'source_type', 'source_ref',
-  'recurring', 'schedule', 'last_run', 'next_due', 'created', 'id',
+  'recurring', 'schedule', 'recipe', 'last_run', 'next_due', 'created', 'id',
 ];
 
 const PRIORITY_RANK: Record<string, number> = { high: 3, normal: 2, low: 1 };
@@ -423,6 +425,7 @@ export async function createTask(cfg: MarketingContextConfig, input: TaskInput):
     ...(input.source_ref ? { source_ref: input.source_ref } : {}),
     ...(input.recurring ? { recurring: true } : {}),
     ...(input.schedule ? { schedule: input.schedule } : {}),
+    ...(input.recipe ? { recipe: input.recipe } : {}),
     ...(nextDue ? { next_due: nextDue } : {}),
     created: now.toISOString(),
     id,
@@ -536,6 +539,7 @@ function toTaskRecord(rel: string, raw: string): TaskRecord {
     knowledge,
     source_type: frontmatter.source_type ? String(frontmatter.source_type) : undefined,
     source_ref: frontmatter.source_ref ? String(frontmatter.source_ref) : undefined,
+    recipe: frontmatter.recipe ? String(frontmatter.recipe) : undefined,
     recurring: frontmatter.recurring === true,
     schedule: frontmatter.schedule ? String(frontmatter.schedule) : undefined,
     next_due: frontmatter.next_due ? String(frontmatter.next_due) : undefined,

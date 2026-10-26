@@ -250,6 +250,7 @@ function toTaskRecord(rel, raw) {
     knowledge,
     source_type: frontmatter.source_type ? String(frontmatter.source_type) : void 0,
     source_ref: frontmatter.source_ref ? String(frontmatter.source_ref) : void 0,
+    recipe: frontmatter.recipe ? String(frontmatter.recipe) : void 0,
     recurring: frontmatter.recurring === true,
     schedule: frontmatter.schedule ? String(frontmatter.schedule) : void 0,
     next_due: frontmatter.next_due ? String(frontmatter.next_due) : void 0,

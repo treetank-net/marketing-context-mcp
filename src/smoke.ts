@@ -10,6 +10,7 @@ import { appendJsonl, appendMarkdownLog, appendTaskNote, computeNextDue, copyBun
 
 const rootDir = await mkdtemp(join(tmpdir(), 'marketing-context-smoke-'));
 const cfg: MarketingContextConfig = { rootDir, knowledgeMode: 'plugin', settings: { ...SETTING_DEFAULTS } };
+const locatorPath = join(rootDir, 'locator', 'root.json');
 
 // A shared knowledge doc plus per-client notes under clients/.
 await upsertMarkdownSection(cfg, 'general/sample.md', 'Note', 'Shared knowledge.');
@@ -330,6 +331,51 @@ const t0 = betaTasks[0];
 if (t0.suggested_workflow !== 'google-ads/weekly-check.md') throw new Error('Instantiated task missing suggested_workflow.');
 if (t0.source_type !== 'knowledge' || !t0.recurring || !t0.next_due) throw new Error('Instantiated task not grounded/recurring.');
 if (t0.intent !== 'weekly_google_ads_check') throw new Error('Instantiated task missing intent from template.');
+
+// --- report recipes: saved under clients/<slug>/recipes, linked from a recurring task ---
+{
+  const { saveRecipe, readRecipe, listRecipes } = await import('./recipes.js');
+  const templateSource = join(rootDir, 'source-template.html');
+  await writeFile(templateSource, '<html><!--RECIPE_DATA--><!--RECIPE_CONCLUSIONS--></html>', 'utf8');
+  const saved = await saveRecipe(cfg, {
+    client_slug: 'Acme',
+    name: 'weekly_leads',
+    template_html_path: templateSource,
+    steps: [{ id: 'crm', tool: 'search_crm_objects', page_params: ['offset'], args: { objectType: 'CONTACT', value: '{{start_ms}}', compare: '{{prev_end}}' } }],
+  });
+  if (saved.path !== 'clients/acme/recipes/weekly_leads.json' || saved.warnings.length) throw new Error(`Recipe save wrong: ${JSON.stringify(saved)}`);
+  if ((await readRecipe(cfg, 'acme', 'weekly_leads')).recipe.template_html !== 'weekly_leads.template.html') throw new Error('Recipe template not copied.');
+  const resaved = await saveRecipe(cfg, { client_slug: 'acme', name: 'weekly_leads', description: 'Edited', steps: saved.recipe.steps });
+  if (resaved.recipe.template_html !== 'weekly_leads.template.html' || resaved.recipe.created_at !== saved.recipe.created_at) throw new Error('Re-saving a recipe must keep its template and creation time.');
+  for (const bad of [{ id: 'x', tool: 't', args: { value: '{{tomorrow}}' } }, { id: 'Bad Id', tool: 't', args: { value: '{{start}}' } }]) {
+    try {
+      await saveRecipe(cfg, { client_slug: 'acme', name: 'broken', steps: [bad] });
+      throw new Error(`Invalid recipe step accepted: ${JSON.stringify(bad)}`);
+    } catch (error) {
+      if (!(error instanceof Error) || error.message.startsWith('Invalid recipe step accepted')) throw error;
+    }
+  }
+  if ((await listRecipes(cfg)).map((recipe) => `${recipe.client_slug}/${recipe.name}`).join() !== 'acme/weekly_leads') throw new Error('list_recipes wrong.');
+  const recipeTask = await createTask(cfg, { client_slug: 'acme', title: 'Weekly leads report', recurring: true, schedule: 'weekly', recipe: 'acme/weekly_leads' });
+  if ((await listTasks(cfg, { client_slug: 'acme' })).find((task) => task.id === recipeTask.id)?.recipe !== 'acme/weekly_leads') throw new Error('Task recipe field not persisted.');
+
+  const { registerWriteTools } = await import('./tools/write.js');
+  const writeHandlers: Record<string, (args: any) => Promise<{ content: Array<{ text: string }> }>> = {};
+  registerWriteTools({ tool: (name: string, _d: string, _s: unknown, h: any) => { writeHandlers[name] = h; } } as any, cfg);
+  const conclusions = join(rootDir, 'conclusions.md');
+  await writeFile(conclusions, '- Leads up 12% (api_key=secret999)', 'utf8');
+  await writeHandlers['append_review']({ client_slug: 'acme', platform: 'hubspot', summary_path: conclusions, period: '2026-10-19..2026-10-25' });
+  const reviewLog = await readFile(resolveInsideRoot(cfg, 'clients/acme/review-log.md'), 'utf8');
+  if (!reviewLog.includes('Leads up 12%') || !reviewLog.includes('[REDACTED]')) throw new Error('append_review summary_path not read or not redacted.');
+  for (const args of [{ summary: 'a', summary_path: conclusions }, { summary_path: templateSource }]) {
+    try {
+      await writeHandlers['append_review']({ client_slug: 'acme', platform: 'hubspot', ...args });
+      throw new Error('append_review accepted an invalid summary source.');
+    } catch (error) {
+      if (!(error instanceof Error) || error.message.startsWith('append_review accepted')) throw error;
+    }
+  }
+}
 
 // Semantic hook path: a fake /rank endpoint can mark a matched article as
 // required reading, but only ads-platform tools are gated by it.
@@ -792,7 +838,7 @@ async function runHook(payload: unknown, env: Record<string, string>): Promise<s
 async function checkToolListingBudget(): Promise<void> {
   const child = spawn(process.execPath, [join(process.cwd(), 'bundle.cjs')], {
     cwd: process.cwd(),
-    env: { ...process.env, MARKETING_CONTEXT_DIR: rootDir, MARKETING_CONTEXT_NO_UPDATE: '1', MARKETING_CONTEXT_EMBED: '0' },
+    env: { ...process.env, MARKETING_CONTEXT_DIR: rootDir, MARKETING_CONTEXT_LOCATOR: locatorPath, MARKETING_CONTEXT_NO_UPDATE: '1', MARKETING_CONTEXT_EMBED: '0' },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   let buffer = '';
@@ -813,6 +859,8 @@ async function checkToolListingBudget(): Promise<void> {
   send({ jsonrpc: '2.0', method: 'notifications/initialized' });
   send({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
   const { result } = await listing.finally(() => child.kill());
+  const locator = JSON.parse(await readFile(locatorPath, 'utf8'));
+  if (locator.root_dir !== rootDir) throw new Error(`Context root locator wrong: ${JSON.stringify(locator)}`);
   const size = JSON.stringify(result.tools).length;
   if (size > 12000) throw new Error(`tools/list over budget: ${size} chars (limit 12000).`);
   for (const tool of result.tools) {

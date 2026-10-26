@@ -88,13 +88,19 @@ Writes:
 
 - `append_decision`
 - `append_mutation`
-- `append_review`
+- `append_review` (`summary_path` reads a local `.md` file instead of re-sending text)
 - `upsert_client_profile`
 - `append_preference`
 
+Report recipes (executed by `report-baby`, format in
+[docs/report-recipe-contract.md](docs/report-recipe-contract.md)):
+
+- `save_recipe`
+- `list_recipes` (with `client_slug` + `name`: the full definition for editing)
+
 Tasks:
 
-- `append_task`
+- `append_task` (`recipe` links a recurring task to a report recipe)
 - `list_tasks`
 - `list_due_tasks`
 - `update_task_status`

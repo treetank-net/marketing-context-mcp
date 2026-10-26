@@ -40,6 +40,7 @@ export function registerTaskTools(server: McpServer, cfg: MarketingContextConfig
         .string()
         .optional()
         .describe('daily/weekly/biweekly/monthly/quarterly/yearly or 5-field cron, e.g. "0 9 * * MON"'),
+      recipe: z.string().optional().describe('Recipe "<client>/<name>" this task refreshes'),
     },
     async (input) => {
       const task = await createTask(cfg, input);
@@ -242,6 +243,7 @@ function renderTaskLine(t: TaskRecord): string {
     .filter(Boolean)
     .join(' ');
   const refs = [
+    t.recipe ? `recipe: ${t.recipe}` : '',
     t.suggested_workflow ? `workflow: ${t.suggested_workflow}` : '',
     t.knowledge.length ? `knowledge: ${t.knowledge.join(', ')}` : '',
   ]

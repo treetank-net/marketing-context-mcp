@@ -1,7 +1,11 @@
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { MarketingContextConfig } from '../config.js';
+import { readFile, stat } from 'node:fs/promises';
+import { extname } from 'node:path';
 import { appendJsonl, appendMarkdownLog, safeSlug, upsertMarkdownSection } from '../storage.js';
+
+const MAX_SUMMARY_FILE_BYTES = 64 * 1024;
 
 export function registerWriteTools(server: McpServer, cfg: MarketingContextConfig) {
   server.tool(
@@ -55,21 +59,23 @@ export function registerWriteTools(server: McpServer, cfg: MarketingContextConfi
 
   server.tool(
     'append_review',
-    'Append a client review note or summary to a client review log.',
+    'Append a review note to a client review log; summary_path reads a local .md (e.g. recipe conclusions) instead of re-sending it.',
     {
       client_slug: z.string(),
       platform: z.string(),
-      summary: z.string(),
+      summary: z.string().optional(),
+      summary_path: z.string().optional().describe('Local .md file, max 64 KB'),
       period: z.string().optional(),
       tags: z.array(z.string()).optional(),
     },
-    async ({ client_slug, platform, summary, period, tags }) => {
+    async ({ client_slug, platform, summary, summary_path, period, tags }) => {
       const slug = safeSlug(client_slug);
+      const text = await reviewText(summary, summary_path);
       const path = await appendMarkdownLog(
         cfg,
         `clients/${slug}/review-log.md`,
         heading([platform, period, tags?.join(', ')]),
-        summary,
+        text,
       );
       return textResult(`Appended review to ${path}.`);
     },
@@ -105,6 +111,16 @@ export function registerWriteTools(server: McpServer, cfg: MarketingContextConfi
       return textResult(`Appended preference to ${path}.`);
     },
   );
+}
+
+async function reviewText(summary: string | undefined, summaryPath: string | undefined): Promise<string> {
+  if ((summary === undefined) === (summaryPath === undefined)) throw new Error('Pass exactly one of summary or summary_path.');
+  if (summary !== undefined) return summary;
+  const path = summaryPath as string;
+  if (extname(path).toLowerCase() !== '.md') throw new Error('summary_path must point to a .md file.');
+  const info = await stat(path);
+  if (info.size > MAX_SUMMARY_FILE_BYTES) throw new Error(`summary_path is ${info.size} bytes; the limit is ${MAX_SUMMARY_FILE_BYTES}.`);
+  return readFile(path, 'utf8');
 }
 
 function textResult(text: string) {
